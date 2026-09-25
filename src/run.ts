@@ -1,0 +1,205 @@
+import type { OpenCodeClient } from "@opencode/client"
+
+type Client = Pick<OpenCodeClient, "session" | "message" | "event" | "skill" | "permission">
+
+export type RunOptions = {
+  directory: string
+  prompt: string
+  agent?: string
+  title?: string
+  timeout?: number
+  signal?: AbortSignal
+  write?: (text: string) => void
+}
+
+/** Run one CI turn. The caller owns the SDK host and closes it afterwards. */
+export async function run(client: Client, options: RunOptions) {
+  const write = options.write ?? ((text: string) => process.stdout.write(text))
+  const controller = new AbortController()
+  const events = client.event.subscribe({ signal: controller.signal })[Symbol.asyncIterator]()
+  // Subscribe before creating the session: subscriptions are live-only.
+  const connected = await events.next()
+  if (connected.done) throw new Error("OpenCode event stream disconnected")
+
+  const sessions = new Map<string, { label: string; parentID?: string }>()
+  const printed = new Map<string, string>()
+  const headings = new Set<string>()
+  const renderedTools = new Set<string>()
+  const tools = new Map<string, { name: string; input: Record<string, unknown> }>()
+  let failure: Error | undefined
+  let rootID: string | undefined
+  let cancelled = false
+  const stop = () => {
+    cancelled = true
+    if (rootID) void client.session.interrupt({ sessionID: rootID }).catch(() => {})
+  }
+  process.on("SIGINT", stop)
+  process.on("SIGTERM", stop)
+  options.signal?.addEventListener("abort", stop, { once: true })
+
+  const print = (sessionID: string, messageID: string, ordinal: number, text: string) => {
+    const key = `${messageID}:${ordinal}`
+    const previous = printed.get(key) ?? ""
+    if (previous === text) return
+    const delta = text.startsWith(previous) ? text.slice(previous.length) : text
+    printed.set(key, text)
+    if (!delta.trim()) return
+    line(sessionID, `${delta.trim()}\n`)
+  }
+
+  const line = (sessionID: string, text: string) => {
+    const session = sessions.get(sessionID)
+    if (!session?.parentID) return write(text)
+    write(text.split("\n").map((row) => row ? `[${session.label}] ${row}` : "").join("\n"))
+  }
+
+  const heading = (sessionID: string, messageID: string, agent: string, model: string) => {
+    if (headings.has(messageID)) return
+    headings.add(messageID)
+    line(sessionID, `\n> ${agent} · ${model}\n\n`)
+  }
+
+  const toolLine = (sessionID: string, messageID: string, id: string, name: string, input: Record<string, unknown>, content?: ReadonlyArray<{ type: string; text?: string }>, error?: string) => {
+    const key = `${messageID}:${id}`
+    if (renderedTools.has(key)) return
+    renderedTools.add(key)
+    const value = (field: string) => typeof input[field] === "string" ? input[field] : ""
+    const path = value("path") || value("filePath")
+    const short = path.startsWith(options.directory + "/") ? path.slice(options.directory.length + 1) : path
+    const label = name === "shell" ? value("command") : name === "subagent"
+      ? value("description") || `${value("agent") || "Unknown"} Subagent`
+      : name === "skill" ? `Skill "${value("id")}"`
+      : `${name[0]?.toUpperCase() ?? ""}${name.slice(1)}${short ? ` ${short}` : ""}`
+    const icon = error ? "✗" : name === "shell" ? "$" : name === "subagent" ? "✓" : ["write", "edit"].includes(name) ? "←" : "→"
+    if (name === "shell") {
+      line(sessionID, `\n${icon} ${label}\n`)
+      const output = content?.filter((item) => item.type === "text").map((item) => item.text).join("\n").trim()
+      if (output) line(sessionID, `${output}\n`)
+      line(sessionID, "\n")
+    } else {
+      line(sessionID, `${icon} ${label}${name === "subagent" && value("agent") ? `  ${value("agent")} Agent` : ""}\n`)
+    }
+    if (error) line(sessionID, `${error}\n`)
+  }
+
+  const consume = (async () => {
+    while (!controller.signal.aborted) {
+      const item = await events.next()
+      if (item.done) {
+        if (!controller.signal.aborted) failure = new Error("OpenCode event stream disconnected")
+        return
+      }
+      const event = item.value
+      if (event.type === "session.created" && event.data.parentID && sessions.has(event.data.parentID)) {
+        sessions.set(event.data.sessionID, { label: event.data.title ?? event.data.sessionID, parentID: event.data.parentID })
+      }
+      if (!("sessionID" in event.data) || !sessions.has(event.data.sessionID)) continue
+      if (event.type === "session.text.ended") {
+        print(event.data.sessionID, event.data.assistantMessageID, event.data.ordinal, event.data.text)
+      }
+      if (event.type === "session.step.started") {
+        heading(event.data.sessionID, event.data.assistantMessageID, event.data.agent, event.data.model.id)
+      }
+      if (event.type === "session.tool.input.started") {
+        tools.set(`${event.data.assistantMessageID}:${event.data.id}`, { name: event.data.name, input: {} })
+      }
+      if (event.type === "session.tool.called") {
+        const key = `${event.data.assistantMessageID}:${event.data.id}`
+        tools.set(key, { name: tools.get(key)?.name ?? "tool", input: event.data.input })
+      }
+      if (event.type === "session.tool.success" || event.type === "session.tool.failed") {
+        const key = `${event.data.assistantMessageID}:${event.data.id}`
+        const tool = tools.get(key)
+        tools.delete(key)
+        toolLine(event.data.sessionID, event.data.assistantMessageID, event.data.id, tool?.name ?? "tool", tool?.input ?? {}, event.data.content, event.type === "session.tool.failed" ? event.data.error.message : undefined)
+      }
+      if (event.type === "session.execution.failed") {
+        line(event.data.sessionID, `Error: ${event.data.error.message}\n`)
+        failure = new Error(event.data.error.message)
+      }
+      if (event.type === "permission.asked") {
+        // CI cannot answer a prompt. Reject it rather than hanging indefinitely.
+        await client.permission.reply({ sessionID: event.data.sessionID, requestID: event.data.id, decision: "reject" })
+        failure = new Error(`Permission denied: ${event.data.action} (${event.data.resources.join(", ")})`)
+      }
+    }
+  })().catch((error: unknown) => {
+    if (!controller.signal.aborted) failure = error instanceof Error ? error : new Error(String(error))
+  })
+
+  try {
+    const session = await client.session.create({
+      location: { directory: options.directory },
+      agent: options.agent,
+      title: options.title,
+    })
+    rootID = session.id
+    sessions.set(rootID, { label: "main" })
+
+    const prompt = options.prompt.trim()
+    const slash = /^\/([\w.-]+)(?:\s+([\s\S]*))?$/.exec(prompt)
+    if (slash) {
+      await client.session.command({ sessionID: rootID, name: slash[1]!, text: slash[2] ?? "" })
+    } else {
+      const available = await client.skill.list({ location: { directory: options.directory } })
+      const names = new Set(available.data.map((skill) => skill.id))
+      const skills = [...prompt.matchAll(/(^|\s)@(?:skill:)?([\w.-]+)/g)]
+        .filter((match) => names.has(match[2]!))
+        .map((match) => ({
+          id: match[2]!,
+          mention: { start: match.index + match[1]!.length, end: match.index + match[0]!.length, text: match[0]!.trim() },
+        }))
+      await client.session.prompt({ sessionID: rootID, text: prompt, skills })
+    }
+
+    await client.session.wait({ sessionID: rootID })
+
+    // Child sessions are separate streams. Reconcile persisted messages as well as
+    // live events so fast children and event-stream gaps do not hide their output.
+    const pending = [rootID]
+    for (const id of pending) {
+      const children = await client.session.list({ parentID: id, limit: 200 })
+      for (const child of children.data) {
+        sessions.set(child.id, { label: child.title ?? child.id, parentID: id })
+        if (!pending.includes(child.id)) pending.push(child.id)
+      }
+    }
+    for (const id of pending.slice(1)) await client.session.wait({ sessionID: id })
+    for (const id of pending) {
+      let cursor: string | undefined
+      const messages = [] as Awaited<ReturnType<Client["message"]["list"]>>["data"][number][]
+      do {
+        const page = await client.message.list({ sessionID: id, order: "desc", limit: 200, cursor })
+        messages.push(...page.data)
+        cursor = page.cursor.next ?? undefined
+      } while (cursor)
+      for (const message of messages.reverse()) {
+        if (message.type !== "assistant") continue
+        // Match run's step header even when a fast step finished before the live subscription saw it.
+        if (message.content.length && !printed.has(`${message.id}:0`)) heading(id, message.id, message.agent, message.model.id)
+        let ordinal = 0
+        for (const content of message.content) {
+          if (content.type === "text") print(id, message.id, ordinal++, content.text)
+          if (content.type === "tool" && (content.state.status === "completed" || content.state.status === "error")) {
+            toolLine(id, message.id, content.id, content.name, content.state.input, content.state.content,
+              content.state.status === "error" ? content.state.error.message : undefined)
+          }
+        }
+        if (message.error) failure = new Error(message.error.message)
+      }
+      const result = await client.session.get({ sessionID: id })
+      if (result.outcome === "failed" || result.outcome === "interrupted")
+        failure ??= new Error(`Session ${id} ${result.outcome}`)
+    }
+    if (cancelled) throw new Error("Interrupted")
+    if (failure) throw failure
+    return session.id
+  } finally {
+    process.off("SIGINT", stop)
+    process.off("SIGTERM", stop)
+    options.signal?.removeEventListener("abort", stop)
+    controller.abort()
+    void events.return?.(undefined).catch(() => {})
+    await consume
+  }
+}

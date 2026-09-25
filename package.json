@@ -1,0 +1,33 @@
+{
+  "name": "@kompassdev/opencode-ci",
+  "version": "0.1.0",
+  "description": "OpenCode V2 CI runner with subagent output and command/skill support",
+  "type": "module",
+  "bin": {
+    "opencode-ci": "./dist/cli.js"
+  },
+  "files": ["dist", "README.md"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kompassdev/opencide-ci.git"
+  },
+  "homepage": "https://github.com/kompassdev/opencide-ci#readme",
+  "bugs": "https://github.com/kompassdev/opencide-ci/issues",
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "start": "bun src/cli.ts",
+    "build": "bun build ./src/cli.ts --target bun --external @opencode/sdk --outdir dist",
+    "prepack": "bun run build",
+    "test": "bun test",
+    "typecheck": "bunx tsc --noEmit"
+  },
+  "dependencies": {
+    "@opencode/sdk": "2.0.16"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "latest"
+  }
+}
