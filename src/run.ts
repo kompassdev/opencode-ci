@@ -1,4 +1,5 @@
 import type { OpenCodeClient } from "@opencode/client"
+import { renderTool } from "./render-tool"
 
 type Client = Pick<OpenCodeClient, "session" | "message" | "event" | "skill" | "permission" | "model">
 
@@ -32,14 +33,13 @@ export async function run(client: Client, options: RunOptions) {
   const tools = new Map<string, { name: string; input: Record<string, unknown> }>()
   let failure: Error | undefined
   let rootID: string | undefined
-  let cancelled = false
+  let interrupting: Promise<unknown> | undefined
   const stop = () => {
-    cancelled = true
-    if (rootID) void client.session.interrupt({ sessionID: rootID }).catch(() => {})
+    if (rootID && !interrupting)
+      interrupting = client.session.interrupt({ sessionID: rootID }, { signal: AbortSignal.timeout(5000) }).catch(() => {})
   }
-  process.on("SIGINT", stop)
-  process.on("SIGTERM", stop)
   options.signal?.addEventListener("abort", stop, { once: true })
+  const checkCancelled = () => options.signal?.throwIfAborted()
 
   const print = (sessionID: string, messageID: string, ordinal: number, text: string) => {
     const key = `${messageID}:text:${ordinal}`
@@ -73,27 +73,11 @@ export async function run(client: Client, options: RunOptions) {
     line(sessionID, `\n> ${agent} · ${model}\n\n`)
   }
 
-  const toolLine = (sessionID: string, messageID: string, id: string, name: string, input: Record<string, unknown>, content?: ReadonlyArray<{ type: string; text?: string }>, error?: string) => {
+  const toolLine = (sessionID: string, messageID: string, id: string, name: string, input: Record<string, unknown>, content?: ReadonlyArray<{ type: string; text?: string }>, metadata?: Record<string, unknown>, error?: string) => {
     const key = `${messageID}:${id}`
     if (renderedTools.has(key)) return
     renderedTools.add(key)
-    const value = (field: string) => typeof input[field] === "string" ? input[field] : ""
-    const path = value("path") || value("filePath")
-    const short = path.startsWith(options.directory + "/") ? path.slice(options.directory.length + 1) : path
-    const label = name === "shell" ? value("command") : name === "subagent"
-      ? value("description") || `${value("agent") || "Unknown"} Subagent`
-      : name === "skill" ? `Skill "${value("id")}"`
-      : `${name[0]?.toUpperCase() ?? ""}${name.slice(1)}${short ? ` ${short}` : ""}`
-    const icon = error ? "✗" : name === "shell" ? "$" : name === "subagent" ? "✓" : ["write", "edit"].includes(name) ? "←" : "→"
-    if (name === "shell") {
-      line(sessionID, `\n${icon} ${label}\n`)
-      const output = content?.filter((item) => item.type === "text").map((item) => item.text).join("\n").trim()
-      if (output) line(sessionID, `${output}\n`)
-      line(sessionID, "\n")
-    } else {
-      line(sessionID, `${icon} ${label}${name === "subagent" && value("agent") ? `  ${value("agent")} Agent` : ""}\n`)
-    }
-    if (error) line(sessionID, `${error}\n`)
+    line(sessionID, renderTool({ name, input, content, metadata, error, directory: options.directory }))
   }
 
   const consume = (async () => {
@@ -128,7 +112,7 @@ export async function run(client: Client, options: RunOptions) {
         const key = `${event.data.assistantMessageID}:${event.data.id}`
         const tool = tools.get(key)
         tools.delete(key)
-        toolLine(event.data.sessionID, event.data.assistantMessageID, event.data.id, tool?.name ?? "tool", tool?.input ?? {}, event.data.content, event.type === "session.tool.failed" ? event.data.error.message : undefined)
+        toolLine(event.data.sessionID, event.data.assistantMessageID, event.data.id, tool?.name ?? "tool", tool?.input ?? {}, event.data.content, event.data.metadata, event.type === "session.tool.failed" ? event.data.error.message : undefined)
       }
       if (event.type === "session.execution.failed") {
         line(event.data.sessionID, `Error: ${event.data.error.message}\n`)
@@ -145,6 +129,7 @@ export async function run(client: Client, options: RunOptions) {
   })
 
   try {
+    checkCancelled()
     const model = resolveModel(options.model, options.variant)
       ?? (options.variant ? await client.model.default({ location: { directory: options.directory } }).then((result) => {
         if (!result.data) throw new Error("Cannot select a variant before selecting a model")
@@ -155,11 +140,14 @@ export async function run(client: Client, options: RunOptions) {
       agent: options.agent,
       model,
       title: options.title,
-    })
+    }, { signal: options.signal })
     rootID = session.id
     sessions.set(rootID, { label: "main" })
+    if (options.signal?.aborted) stop()
+    checkCancelled()
 
     const prepared = await Promise.all((options.files ?? []).map(async (file) => {
+      checkCancelled()
       const data = Bun.file(file)
       if (!await data.exists()) throw new Error(`File not found: ${file}`)
       if (data.size > 10 * 1024 * 1024) throw new Error(`File larger than 10 MiB: ${file}`)
@@ -178,9 +166,10 @@ export async function run(client: Client, options: RunOptions) {
     }))
     const prompt = [options.prompt.trim(), ...prepared.flatMap((item) => item.text ? [item.text] : [])].join("\n\n")
     const files = prepared.flatMap((item) => item.attachment ? [item.attachment] : [])
+    checkCancelled()
     const slash = /^\/([\w.-]+)(?:\s+([\s\S]*))?$/.exec(prompt)
     if (slash) {
-      await client.session.command({ sessionID: rootID, name: slash[1]!, text: slash[2] ?? "", files: files.length ? files : undefined })
+      await client.session.command({ sessionID: rootID, name: slash[1]!, text: slash[2] ?? "", files: files.length ? files : undefined }, { signal: options.signal })
     } else {
       const available = await client.skill.list({ location: { directory: options.directory } })
       const names = new Set(available.data.map((skill) => skill.id))
@@ -190,27 +179,34 @@ export async function run(client: Client, options: RunOptions) {
           id: match[2]!,
           mention: { start: match.index + match[1]!.length, end: match.index + match[0]!.length, text: match[0]!.trim() },
         }))
-      await client.session.prompt({ sessionID: rootID, text: prompt, files: files.length ? files : undefined, skills })
+      await client.session.prompt({ sessionID: rootID, text: prompt, files: files.length ? files : undefined, skills }, { signal: options.signal })
     }
 
-    await client.session.wait({ sessionID: rootID })
+    checkCancelled()
+    await client.session.wait({ sessionID: rootID }, { signal: options.signal })
+    checkCancelled()
 
     // Child sessions are separate streams. Reconcile persisted messages as well as
     // live events so fast children and event-stream gaps do not hide their output.
     const pending = [rootID]
     for (const id of pending) {
-      const children = await client.session.list({ parentID: id, limit: 200 })
+      checkCancelled()
+      const children = await client.session.list({ parentID: id, limit: 200 }, { signal: options.signal })
       for (const child of children.data) {
         sessions.set(child.id, { label: child.title ?? child.id, parentID: id })
         if (!pending.includes(child.id)) pending.push(child.id)
       }
     }
-    for (const id of pending.slice(1)) await client.session.wait({ sessionID: id })
+    for (const id of pending.slice(1)) {
+      checkCancelled()
+      await client.session.wait({ sessionID: id }, { signal: options.signal })
+    }
     for (const id of pending) {
+      checkCancelled()
       let cursor: string | undefined
       const messages = [] as Awaited<ReturnType<Client["message"]["list"]>>["data"][number][]
       do {
-        const page = await client.message.list({ sessionID: id, order: "desc", limit: 200, cursor })
+        const page = await client.message.list({ sessionID: id, order: "desc", limit: 200, cursor }, { signal: options.signal })
         messages.push(...page.data)
         cursor = page.cursor.next ?? undefined
       } while (cursor)
@@ -224,26 +220,25 @@ export async function run(client: Client, options: RunOptions) {
           if (content.type === "text") print(id, message.id, ordinal++, content.text)
           if (content.type === "reasoning") reasoning(id, message.id, reasoningOrdinal++, content.text)
           if (content.type === "tool" && (content.state.status === "completed" || content.state.status === "error")) {
-            toolLine(id, message.id, content.id, content.name, content.state.input, content.state.content,
+            toolLine(id, message.id, content.id, content.name, content.state.input, content.state.content, content.state.metadata,
               content.state.status === "error" ? content.state.error.message : undefined)
           }
         }
         if (message.error) failure = new Error(message.error.message)
       }
-      const result = await client.session.get({ sessionID: id })
+      const result = await client.session.get({ sessionID: id }, { signal: options.signal })
       if (result.outcome === "failed" || result.outcome === "interrupted")
         failure ??= new Error(`Session ${id} ${result.outcome}`)
     }
-    if (cancelled) throw new Error("Interrupted")
+    checkCancelled()
     if (failure) throw failure
     return session.id
   } finally {
-    process.off("SIGINT", stop)
-    process.off("SIGTERM", stop)
     options.signal?.removeEventListener("abort", stop)
     controller.abort()
     void events.return?.(undefined).catch(() => {})
     await consume
+    await interrupting
   }
 }
 

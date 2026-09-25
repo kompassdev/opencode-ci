@@ -4,8 +4,8 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { resolveModel, run } from "../src/run"
 
-function fixture(input: { prompt: string; children?: boolean; childFailed?: boolean; tool?: boolean; model?: string; variant?: string; thinking?: boolean; auto?: boolean; files?: string[] }) {
-  const calls: { create?: unknown; command?: unknown; prompt?: unknown } = {}
+function fixture(input: { prompt: string; children?: boolean; childFailed?: boolean; tool?: boolean; model?: string; variant?: string; thinking?: boolean; auto?: boolean; files?: string[]; signal?: AbortSignal; waitForAbort?: boolean }) {
+  const calls: { create?: unknown; command?: unknown; prompt?: unknown; interrupted?: string } = {}
   const output: string[] = []
   const client = {
     event: {
@@ -18,12 +18,15 @@ function fixture(input: { prompt: string; children?: boolean; childFailed?: bool
       create: async (value: unknown) => { calls.create = value; return { id: "root" } },
       command: async (value: unknown) => { calls.command = value },
       prompt: async (value: unknown) => { calls.prompt = value },
-      wait: async () => {},
+      wait: async (_: unknown, options?: { signal?: AbortSignal }) => {
+        if (!input.waitForAbort) return
+        await new Promise<void>((_, reject) => options?.signal?.addEventListener("abort", () => reject(options.signal?.reason), { once: true }))
+      },
       list: async ({ parentID }: { parentID: string }) => ({
         data: input.children && parentID === "root" ? [{ id: "child", title: "reviewer" }] : [],
       }),
       get: async ({ sessionID }: { sessionID: string }) => ({ outcome: sessionID === "child" && input.childFailed ? "failed" : "succeeded" }),
-      interrupt: async () => {},
+      interrupt: async ({ sessionID }: { sessionID: string }) => { calls.interrupted = sessionID },
     },
     skill: { list: async () => ({ data: [{ id: "review" }] }) },
     model: { default: async () => ({ data: { providerID: "openai", id: "gpt-6-sol" } }) },
@@ -43,7 +46,7 @@ function fixture(input: { prompt: string; children?: boolean; childFailed?: bool
   }
   const execute = () => run(client as unknown as Parameters<typeof run>[0], {
     directory: "/workspace", prompt: input.prompt, model: input.model, variant: input.variant,
-    thinking: input.thinking, auto: input.auto, files: input.files, write: (text) => output.push(text),
+    thinking: input.thinking, auto: input.auto, files: input.files, signal: input.signal, write: (text) => output.push(text),
   })
   return { execute, calls, output }
 }
@@ -108,4 +111,13 @@ test("includes text files with the prompt", async () => {
   } finally {
     await rm(directory, { recursive: true })
   }
+})
+
+test("aborting a run interrupts the active session and cancels its wait", async () => {
+  const controller = new AbortController()
+  const test = fixture({ prompt: "review", signal: controller.signal, waitForAbort: true })
+  const pending = test.execute()
+  setTimeout(() => controller.abort(new Error("SIGTERM")), 5)
+  await expect(pending).rejects.toThrow("SIGTERM")
+  expect(test.calls.interrupted).toBe("root")
 })

@@ -38,6 +38,8 @@ Example GitHub Actions step after checkout, Bun setup, and authentication (pin t
 
 For example, the log can include `> build · gpt-6-sol`, `→ Read src/app.ts`, `$ bun test`, and `[reviewer] → Read src/app.test.ts`. It shows completed text blocks rather than token-by-token deltas. Live subscriptions have no replay, so the client also reads messages after the run without repeating text already printed. For an isolated CI environment, use the SDK rather than connecting to a user's shared background service. See [V2 build options](https://opencode.ai/v2/docs/build/), [SDK](https://opencode.ai/v2/docs/build/sdk), and [HTTP client](https://opencode.ai/v2/docs/build/client).
 
+The SDK exposes tool inputs, outputs, and metadata but not the TUI's private `toolInlineInfo` formatter. This client renders common tools in a similar style, including shell output and edit diffs, with a readable fallback for other tools. On SIGINT or SIGTERM it interrupts the active session, cancels pending API requests, and exits with status 130 or 143 respectively (timeout: 124). A second signal or a ten-second cleanup deadline forces exit.
+
 ## Development and release
 
 ```sh

@@ -25,6 +25,8 @@ const boolean = (flag: string) => {
   return true
 }
 
+let cancellation: "SIGINT" | "SIGTERM" | "timeout" | undefined
+let timeoutSeconds = 2700
 try {
   if (args.includes("--help") || args.includes("-h")) {
     console.log(usage)
@@ -38,23 +40,44 @@ try {
   const title = value("--title")
   const thinking = boolean("--thinking")
   const auto = boolean("--auto")
-  const timeout = Number(value("--timeout") ?? "2700")
-  if (!Number.isFinite(timeout) || timeout <= 0) throw new Error("--timeout must be positive seconds")
+  timeoutSeconds = Number(value("--timeout") ?? "2700")
+  if (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) throw new Error("--timeout must be positive seconds")
   if (args.some((arg) => arg.startsWith("--"))) throw new Error(`Unknown option: ${args.find((arg) => arg.startsWith("--"))}`)
   const piped = process.stdin.isTTY ? "" : (await Bun.stdin.text()).trim()
   const prompt = [args.join(" "), piped].filter(Boolean).join("\n")
   if (!prompt.trim()) throw new Error(usage)
 
-  await using opencode = await OpenCode.create()
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeout * 1000)
+  const cancel = (reason: "SIGINT" | "SIGTERM" | "timeout") => {
+    // A second cancellation is a hard stop if a provider or cleanup is stuck.
+    if (cancellation) process.exit(cancellation === "SIGTERM" ? 143 : cancellation === "SIGINT" ? 130 : 124)
+    cancellation = reason
+    process.exitCode = reason === "SIGINT" ? 130 : reason === "SIGTERM" ? 143 : 124
+    controller.abort(new Error(reason))
+    // CI may send only one signal; do not leave a stuck provider or SDK teardown running forever.
+    setTimeout(() => process.exit(process.exitCode ?? 1), 10_000).unref()
+  }
+  const interrupt = () => cancel("SIGINT")
+  const terminate = () => cancel("SIGTERM")
+  process.on("SIGINT", interrupt)
+  process.on("SIGTERM", terminate)
+  const timer = setTimeout(() => cancel("timeout"), timeoutSeconds * 1000)
   try {
+    await using opencode = await OpenCode.create()
     await run(opencode, { directory, model, variant, agent, files, title, thinking, auto, prompt, signal: controller.signal })
-    if (controller.signal.aborted) throw new Error(`Timed out after ${timeout}s`)
   } finally {
     clearTimeout(timer)
+    process.off("SIGINT", interrupt)
+    process.off("SIGTERM", terminate)
   }
 } catch (error) {
-  console.error(error instanceof Error ? error.message : String(error))
-  process.exitCode = 1
+  if (cancellation === "SIGINT" || cancellation === "SIGTERM") {
+    process.exitCode = cancellation === "SIGINT" ? 130 : 143
+  } else if (cancellation === "timeout") {
+    console.error(`Timed out after ${timeoutSeconds}s`)
+    process.exitCode = 124
+  } else {
+    console.error(error instanceof Error ? error.message : String(error))
+    process.exitCode = 1
+  }
 }
