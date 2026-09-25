@@ -8,7 +8,15 @@ Requires Bun and OpenCode V2 credentials. Once published, run without cloning th
 bunx @kompassdev/opencode-ci@0.1.0 --directory "$GITHUB_WORKSPACE" --timeout 2400 'Review this pull request'
 ```
 
-You can also pipe a multiline prompt on stdin. Use `--agent NAME` to select an agent and `--title TITLE` to name the session. The checkout must have the OpenCode credentials and project configuration it needs; do not print credentials in CI logs.
+You can also pipe a multiline prompt on stdin. Options include:
+
+- `--model provider/model#variant` (or `-m`) and `--variant NAME` (uses the default model if `--model` is omitted)
+- `--agent NAME`, `--title TITLE`, and repeated `--file PATH` (or `-f`, 10 MiB maximum per file)
+- `--thinking` to print reasoning blocks when available
+- `--auto` to approve each permission request once; by default CI rejects requests rather than hanging
+- `--timeout SECONDS` (default: 2700)
+
+The checkout must have the OpenCode credentials and project configuration it needs; do not print credentials in CI logs. This client always starts a new session. Unlike `opencode run`, it does not yet implement `--continue`, `--session`, `--fork`, or `--format json`.
 
 Examples of V2 input routing:
 

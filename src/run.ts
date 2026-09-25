@@ -1,13 +1,17 @@
 import type { OpenCodeClient } from "@opencode/client"
 
-type Client = Pick<OpenCodeClient, "session" | "message" | "event" | "skill" | "permission">
+type Client = Pick<OpenCodeClient, "session" | "message" | "event" | "skill" | "permission" | "model">
 
 export type RunOptions = {
   directory: string
   prompt: string
   agent?: string
   title?: string
-  timeout?: number
+  model?: string
+  variant?: string
+  thinking?: boolean
+  auto?: boolean
+  files?: string[]
   signal?: AbortSignal
   write?: (text: string) => void
 }
@@ -38,13 +42,23 @@ export async function run(client: Client, options: RunOptions) {
   options.signal?.addEventListener("abort", stop, { once: true })
 
   const print = (sessionID: string, messageID: string, ordinal: number, text: string) => {
-    const key = `${messageID}:${ordinal}`
+    const key = `${messageID}:text:${ordinal}`
     const previous = printed.get(key) ?? ""
     if (previous === text) return
     const delta = text.startsWith(previous) ? text.slice(previous.length) : text
     printed.set(key, text)
     if (!delta.trim()) return
     line(sessionID, `${delta.trim()}\n`)
+  }
+
+  const reasoning = (sessionID: string, messageID: string, ordinal: number, text: string) => {
+    if (!options.thinking) return
+    const key = `${messageID}:reasoning:${ordinal}`
+    const previous = printed.get(key) ?? ""
+    if (previous === text) return
+    const delta = text.startsWith(previous) ? text.slice(previous.length) : text
+    printed.set(key, text)
+    if (delta.trim()) line(sessionID, `Thinking: ${delta.trim()}\n`)
   }
 
   const line = (sessionID: string, text: string) => {
@@ -97,6 +111,9 @@ export async function run(client: Client, options: RunOptions) {
       if (event.type === "session.text.ended") {
         print(event.data.sessionID, event.data.assistantMessageID, event.data.ordinal, event.data.text)
       }
+      if (event.type === "session.reasoning.ended") {
+        reasoning(event.data.sessionID, event.data.assistantMessageID, event.data.ordinal, event.data.text)
+      }
       if (event.type === "session.step.started") {
         heading(event.data.sessionID, event.data.assistantMessageID, event.data.agent, event.data.model.id)
       }
@@ -119,8 +136,8 @@ export async function run(client: Client, options: RunOptions) {
       }
       if (event.type === "permission.asked") {
         // CI cannot answer a prompt. Reject it rather than hanging indefinitely.
-        await client.permission.reply({ sessionID: event.data.sessionID, requestID: event.data.id, decision: "reject" })
-        failure = new Error(`Permission denied: ${event.data.action} (${event.data.resources.join(", ")})`)
+        await client.permission.reply({ sessionID: event.data.sessionID, requestID: event.data.id, decision: options.auto ? "once" : "reject" })
+        if (!options.auto) failure = new Error(`Permission denied: ${event.data.action} (${event.data.resources.join(", ")})`)
       }
     }
   })().catch((error: unknown) => {
@@ -128,18 +145,42 @@ export async function run(client: Client, options: RunOptions) {
   })
 
   try {
+    const model = resolveModel(options.model, options.variant)
+      ?? (options.variant ? await client.model.default({ location: { directory: options.directory } }).then((result) => {
+        if (!result.data) throw new Error("Cannot select a variant before selecting a model")
+        return { providerID: result.data.providerID, id: result.data.id, variant: options.variant }
+      }) : undefined)
     const session = await client.session.create({
       location: { directory: options.directory },
       agent: options.agent,
+      model,
       title: options.title,
     })
     rootID = session.id
     sessions.set(rootID, { label: "main" })
 
-    const prompt = options.prompt.trim()
+    const prepared = await Promise.all((options.files ?? []).map(async (file) => {
+      const data = Bun.file(file)
+      if (!await data.exists()) throw new Error(`File not found: ${file}`)
+      if (data.size > 10 * 1024 * 1024) throw new Error(`File larger than 10 MiB: ${file}`)
+      const bytes = new Uint8Array(await data.arrayBuffer())
+      const mime = data.type || "application/octet-stream"
+      if (mime.startsWith("image/") || mime === "application/pdf") {
+        return { attachment: { uri: `data:${mime};base64,${Buffer.from(bytes).toString("base64")}`, name: file.split("/").at(-1) } }
+      }
+      try {
+        const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes)
+        if (bytes.includes(0)) throw new Error("binary")
+        return { text: `<file name="${file.split("/").at(-1)}">\n${text}\n</file>` }
+      } catch {
+        throw new Error(`Unsupported binary file: ${file}`)
+      }
+    }))
+    const prompt = [options.prompt.trim(), ...prepared.flatMap((item) => item.text ? [item.text] : [])].join("\n\n")
+    const files = prepared.flatMap((item) => item.attachment ? [item.attachment] : [])
     const slash = /^\/([\w.-]+)(?:\s+([\s\S]*))?$/.exec(prompt)
     if (slash) {
-      await client.session.command({ sessionID: rootID, name: slash[1]!, text: slash[2] ?? "" })
+      await client.session.command({ sessionID: rootID, name: slash[1]!, text: slash[2] ?? "", files: files.length ? files : undefined })
     } else {
       const available = await client.skill.list({ location: { directory: options.directory } })
       const names = new Set(available.data.map((skill) => skill.id))
@@ -149,7 +190,7 @@ export async function run(client: Client, options: RunOptions) {
           id: match[2]!,
           mention: { start: match.index + match[1]!.length, end: match.index + match[0]!.length, text: match[0]!.trim() },
         }))
-      await client.session.prompt({ sessionID: rootID, text: prompt, skills })
+      await client.session.prompt({ sessionID: rootID, text: prompt, files: files.length ? files : undefined, skills })
     }
 
     await client.session.wait({ sessionID: rootID })
@@ -176,10 +217,12 @@ export async function run(client: Client, options: RunOptions) {
       for (const message of messages.reverse()) {
         if (message.type !== "assistant") continue
         // Match run's step header even when a fast step finished before the live subscription saw it.
-        if (message.content.length && !printed.has(`${message.id}:0`)) heading(id, message.id, message.agent, message.model.id)
+        if (message.content.length && !printed.has(`${message.id}:text:0`)) heading(id, message.id, message.agent, message.model.id)
         let ordinal = 0
+        let reasoningOrdinal = 0
         for (const content of message.content) {
           if (content.type === "text") print(id, message.id, ordinal++, content.text)
+          if (content.type === "reasoning") reasoning(id, message.id, reasoningOrdinal++, content.text)
           if (content.type === "tool" && (content.state.status === "completed" || content.state.status === "error")) {
             toolLine(id, message.id, content.id, content.name, content.state.input, content.state.content,
               content.state.status === "error" ? content.state.error.message : undefined)
@@ -202,4 +245,12 @@ export async function run(client: Client, options: RunOptions) {
     void events.return?.(undefined).catch(() => {})
     await consume
   }
+}
+
+export function resolveModel(input?: string, variant?: string) {
+  if (!input) return undefined
+  const match = /^([^/#]+)\/([^#]+)(?:#([^#]+))?$/.exec(input)
+  if (!match) throw new Error(`Invalid model reference: ${input} (expected provider/model#variant)`)
+  if (variant && match[3] && variant !== match[3]) throw new Error("--variant conflicts with the variant in --model")
+  return { providerID: match[1]!, id: match[2]!, variant: variant ?? match[3] }
 }
