@@ -66,20 +66,28 @@ export async function run(client: Client, options: RunOptions) {
   const line = (sessionID: string, text: string) => {
     const session = sessions.get(sessionID)
     if (!session?.parentID) return write(text)
-    write(text.split("\n").map((row) => row ? `[${session.label}] ${row}` : "").join("\n"))
+    write(prefix(session.label, text))
+  }
+
+  const prefix = (name: string, text: string) => {
+    const color = !process.env.NO_COLOR && (process.stdout.isTTY || process.env.GITHUB_ACTIONS === "true")
+    const label = color ? `\x1b[90m${name}\x1b[0m` : name
+    return text.split("\n").map((row) => row ? `${label} ${row}` : "").join("\n")
   }
 
   const heading = (sessionID: string, messageID: string, agent: string, model: string) => {
     if (headings.has(messageID)) return
     headings.add(messageID)
-    line(sessionID, `\n> ${agent} · ${model}\n\n`)
+    line(sessionID, `> ${agent} · ${model}\n`)
   }
 
   const toolLine = (sessionID: string, messageID: string, id: string, name: string, input: Record<string, unknown>, content?: ReadonlyArray<{ type: string; text?: string }>, metadata?: Record<string, unknown>, error?: string) => {
     const key = `${messageID}:${id}`
     if (renderedTools.has(key)) return
     renderedTools.add(key)
-    line(sessionID, renderTool({ name, input, content, metadata, error, directory: options.directory }))
+    const description = name === "subagent" && typeof input.description === "string" ? input.description : ""
+    const text = renderTool({ name, input, content, metadata, error, directory: options.directory, prefixed: !!description })
+    line(sessionID, description ? prefix(description, text) : text)
   }
 
   const consume = (async () => {
@@ -212,7 +220,7 @@ export async function run(client: Client, options: RunOptions) {
       let cursor: string | undefined
       const messages = [] as Awaited<ReturnType<Client["message"]["list"]>>["data"][number][]
       do {
-        const page = await client.message.list({ sessionID: id, order: "desc", limit: 200, cursor }, { signal: options.signal })
+        const page = await client.message.list({ sessionID: id, limit: 200, ...(cursor ? { cursor } : { order: "desc" }) }, { signal: options.signal })
         messages.push(...page.data)
         cursor = page.cursor.next ?? undefined
       } while (cursor)

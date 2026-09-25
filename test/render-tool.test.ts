@@ -11,3 +11,12 @@ test("renders common tools like run, including shell output", () => {
   expect(renderTool({ directory, name: "edit", input: { path: "/workspace/src/a.ts" }, metadata: { diff: "-a\n+b" } }))
     .toBe("\n← Edit src/a.ts\n-a\n+b\n\n")
 })
+
+test("renders subagent completion labels like opencode run", () => {
+  expect(renderTool({ directory, name: "subagent", input: { agent: "general", description: "Say hi from subagent one" } }))
+    .toBe("✓ Say hi from subagent one · General Agent\n")
+  expect(renderTool({ directory, name: "subagent", input: { agent: "code-review" } }))
+    .toBe("✓ Code-Review Subagent\n")
+  expect(renderTool({ directory, name: "subagent", input: { agent: "general", description: "reviewer" }, prefixed: true }))
+    .toBe("✓ General Agent\n")
+})

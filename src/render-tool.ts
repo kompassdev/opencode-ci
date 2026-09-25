@@ -5,6 +5,7 @@ type Tool = {
   metadata?: Record<string, unknown>
   error?: string
   directory: string
+  prefixed?: boolean
 }
 
 // The SDK exposes tool data, not @opencode/tui's private toolInlineInfo renderer.
@@ -28,8 +29,8 @@ export function renderTool(tool: Tool) {
       return { icon: "✱", title: `${name} "${text(input.pattern)}"${file ? ` in ${file}` : ""}${count(matches, "match")}` }
     }
     if (tool.name === "subagent") {
-      const agent = text(input.agent) || text(input.subagent_type) || "Unknown"
-      return { icon: "✓", title: `${text(input.description) || `${agent} Subagent`}${input.description ? ` · ${agent} Agent` : ""}` }
+      const agent = (text(input.agent) || text(input.subagent_type) || "unknown").replace(/\b\w/g, (letter) => letter.toUpperCase())
+      return { icon: "✓", title: tool.prefixed ? `${agent} Agent` : `${text(input.description) || `${agent} Subagent`}${input.description ? ` · ${agent} Agent` : ""}` }
     }
     if (tool.name === "skill") return { icon: "→", title: `Skill "${text(tool.metadata?.name) || text(input.id)}"` }
     if (tool.name === "webfetch") return { icon: "%", title: `WebFetch ${text(input.url)}` }

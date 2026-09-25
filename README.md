@@ -4,7 +4,7 @@ Run [OpenCode V2](https://opencode.ai/v2/docs/) in CI with logs that look like `
 
 ## What it adds to `opencode run`
 
-- **Subagent output:** `run` shows the subagent tool call, but not the child's transcript. This client prints the child's steps, tools, and text with a `[subagent name]` prefix.
+- **Subagent output:** `run` shows the subagent tool call, but not the child's transcript. This client prints the child's steps, tools, and text with a dim-colored subagent name prefix in terminals and GitHub Actions (plain text in other redirected logs).
 - **Slash commands:** A prompt starting with `/review` runs the project's `review` command instead of sending `/review` as plain text.
 - **Skill mentions:** `@review` or `@skill:review` attaches the `review` skill when it exists in the project. `run` sends those mentions as plain text.
 
@@ -13,27 +13,28 @@ Run [OpenCode V2](https://opencode.ai/v2/docs/) in CI with logs that look like `
 From a project with OpenCode credentials configured:
 
 ```sh
-npx @kompassdev/opencode-ci@0.1.2 'Review this repository'
+npx @kompassdev/opencode-ci@0.1.3 'Review this repository'
 ```
 
-Prefer Bun? `bunx @kompassdev/opencode-ci@0.1.2 'Review this repository'` works too. The packaged CLI runs on **Node.js 24+** either way; `bunx` also needs Bun.
+Prefer Bun? `bunx @kompassdev/opencode-ci@0.1.3 'Review this repository'` works too. The packaged CLI runs on **Node.js 24+** either way; `bunx` also needs Bun.
 
 When the main agent calls a subagent, the log can look like this:
 
 ```text
 > build · gpt-6-sol
 → Read src/app.ts
-[reviewer] > reviewer · gpt-6-sol
-[reviewer] → Read src/app.test.ts
-[reviewer] Found a missing assertion in src/app.test.ts.
+reviewer > reviewer · gpt-6-sol
+reviewer → Read src/app.test.ts
+reviewer Found a missing assertion in src/app.test.ts.
+reviewer ✓ Reviewer Agent
 The review found one issue.
 ```
 
 Use a project command or skill in the prompt:
 
 ```sh
-npx @kompassdev/opencode-ci@0.1.2 '/review the changed tests'
-npx @kompassdev/opencode-ci@0.1.2 'Use @review to inspect the changes'
+npx @kompassdev/opencode-ci@0.1.3 '/review the changed tests'
+npx @kompassdev/opencode-ci@0.1.3 'Use @review to inspect the changes'
 ```
 
 The command or skill must exist in the project. You can also pipe a multiline prompt through stdin.
@@ -44,11 +45,11 @@ After checkout, Node setup, and OpenCode authentication:
 
 ```yaml
 - name: Review
-  run: npx @kompassdev/opencode-ci@0.1.2 --directory "$GITHUB_WORKSPACE" --timeout 2400 '/review'
+  run: npx @kompassdev/opencode-ci@0.1.3 --directory "$GITHUB_WORKSPACE" --timeout 2400 '/review'
   timeout-minutes: 45
 ```
 
-The job needs your model credentials and project configuration. Keep secrets out of the logs. Pin the CLI version in CI so a new release doesn't change the job unexpectedly; omit `@0.1.2` to use the latest published version. The CLI accepts compatible OpenCode SDK 2.x versions (`^2.0.16`).
+The job needs your model credentials and project configuration. Keep secrets out of the logs. Pin the CLI version in CI so a new release doesn't change the job unexpectedly; omit `@0.1.3` to use the latest published version. The CLI accepts compatible OpenCode SDK 2.x versions (`^2.0.16`).
 
 ## Options
 

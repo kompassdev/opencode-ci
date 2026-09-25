@@ -4,8 +4,8 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { resolveModel, run } from "../src/run"
 
-function fixture(input: { prompt: string; children?: boolean; childFailed?: boolean; tool?: boolean; model?: string; variant?: string; thinking?: boolean; auto?: boolean; files?: string[]; signal?: AbortSignal; waitForAbort?: boolean }) {
-  const calls: { create?: unknown; command?: unknown; prompt?: unknown; interrupted?: string } = {}
+function fixture(input: { prompt: string; children?: boolean; childFailed?: boolean; tool?: boolean; subagent?: boolean; model?: string; variant?: string; thinking?: boolean; auto?: boolean; files?: string[]; signal?: AbortSignal; waitForAbort?: boolean; paginated?: boolean }) {
+  const calls: { create?: unknown; command?: unknown; prompt?: unknown; interrupted?: string; messages: unknown[] } = { messages: [] }
   const output: string[] = []
   const client = {
     event: {
@@ -32,16 +32,21 @@ function fixture(input: { prompt: string; children?: boolean; childFailed?: bool
     model: { default: async () => ({ data: { providerID: "openai", id: "gpt-6-sol" } }) },
     permission: { reply: async () => {} },
     message: {
-      list: async ({ sessionID }: { sessionID: string }) => ({
-        data: sessionID === "child"
-          ? [{ id: "msg_child", type: "assistant", agent: "reviewer", model: { id: "gpt-6-sol" }, content: [{ type: "text", text: "child findings" }] }]
-          : [{ id: "msg_root", type: "assistant", agent: "build", model: { id: "gpt-6-sol" }, content: [
-            ...(input.tool ? [{ type: "tool", id: "tool_1", name: "read", state: { status: "completed", input: { path: "/workspace/src/app.ts" }, content: [{ type: "text", text: "contents" }] } }] : []),
-            ...(input.thinking ? [{ type: "reasoning", text: "checking changes" }] : []),
-            { type: "text", text: "summary" },
-          ] }],
-        cursor: { next: null },
-      }),
+      list: async (params: { sessionID: string; cursor?: string; order?: string }) => {
+        calls.messages.push(params)
+        if (params.cursor && params.order) throw new Error("Cursor cannot be combined with order")
+        return {
+          data: params.sessionID === "child"
+            ? [{ id: "msg_child", type: "assistant", agent: "reviewer", model: { id: "gpt-6-sol" }, content: [{ type: "text", text: "child findings" }] }]
+            : [{ id: "msg_root", type: "assistant", agent: "build", model: { id: "gpt-6-sol" }, content: [
+              ...(input.tool ? [{ type: "tool", id: "tool_1", name: "read", state: { status: "completed", input: { path: "/workspace/src/app.ts" }, content: [{ type: "text", text: "contents" }] } }] : []),
+              ...(input.subagent ? [{ type: "tool", id: "tool_2", name: "subagent", state: { status: "completed", input: { agent: "general", description: "reviewer" }, content: [] } }] : []),
+              ...(input.thinking ? [{ type: "reasoning", text: "checking changes" }] : []),
+              { type: "text", text: "summary" },
+            ] }],
+          cursor: { next: input.paginated && !params.cursor ? "next-page" : null },
+        }
+      },
     },
   }
   const execute = () => run(client as unknown as Parameters<typeof run>[0], {
@@ -64,8 +69,72 @@ test("attaches skill mentions and includes child session output", async () => {
   expect(test.calls.prompt).toEqual({ sessionID: "root", text: "Please @review this", skills: [
     { id: "review", mention: { start: 7, end: 14, text: "@review" } },
   ] })
-  expect(test.output.join("")).toContain("[reviewer] child findings")
+  expect(test.output.join("")).toContain("reviewer child findings")
   expect(test.output.join("")).toContain("summary")
+})
+
+test("uses a dim subagent name prefix in terminals", async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY")
+  const noColor = process.env.NO_COLOR
+  try {
+    Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true })
+    delete process.env.NO_COLOR
+    const test = fixture({ prompt: "Say hi", children: true })
+    await test.execute()
+    expect(test.output.join("")).toContain("\x1b[90mreviewer\x1b[0m child findings")
+    expect(test.output.join("")).not.toContain("\n\n\n")
+  } finally {
+    if (descriptor) Object.defineProperty(process.stdout, "isTTY", descriptor)
+    else Reflect.deleteProperty(process.stdout, "isTTY")
+    if (noColor === undefined) delete process.env.NO_COLOR
+    else process.env.NO_COLOR = noColor
+  }
+})
+
+test("prefixes the subagent finish without repeating its name", async () => {
+  const test = fixture({ prompt: "Ask reviewer", children: true, subagent: true })
+  await test.execute()
+  const output = test.output.join("")
+  expect(output).toContain("reviewer > reviewer · gpt-6-sol")
+  expect(output).toContain("reviewer ✓ General Agent")
+  expect(output).not.toContain("✓ reviewer")
+  expect(output).not.toContain("\n\n")
+})
+
+test("uses the colored prefix in GitHub Actions unless NO_COLOR is set", async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY")
+  const github = process.env.GITHUB_ACTIONS
+  const noColor = process.env.NO_COLOR
+  try {
+    Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: false })
+    process.env.GITHUB_ACTIONS = "true"
+    delete process.env.NO_COLOR
+    const colored = fixture({ prompt: "Say hi", children: true })
+    await colored.execute()
+    expect(colored.output.join("")).toContain("\x1b[90mreviewer\x1b[0m child findings")
+
+    process.env.NO_COLOR = "1"
+    const plain = fixture({ prompt: "Say hi", children: true })
+    await plain.execute()
+    expect(plain.output.join("")).toContain("reviewer child findings")
+    expect(plain.output.join("")).not.toContain("\x1b[")
+  } finally {
+    if (descriptor) Object.defineProperty(process.stdout, "isTTY", descriptor)
+    else Reflect.deleteProperty(process.stdout, "isTTY")
+    if (github === undefined) delete process.env.GITHUB_ACTIONS
+    else process.env.GITHUB_ACTIONS = github
+    if (noColor === undefined) delete process.env.NO_COLOR
+    else process.env.NO_COLOR = noColor
+  }
+})
+
+test("paginates messages without combining cursor and order", async () => {
+  const test = fixture({ prompt: "Hello there", paginated: true })
+  await test.execute()
+  expect(test.calls.messages).toEqual([
+    { sessionID: "root", limit: 200, order: "desc" },
+    { sessionID: "root", limit: 200, cursor: "next-page" },
+  ])
 })
 
 test("exits with an error when a child fails", async () => {
@@ -78,7 +147,7 @@ test("renders run-style step and tool lines with only child output prefixed", as
   await test.execute()
   expect(test.output.join("")).toContain("> build · gpt-6-sol")
   expect(test.output.join("")).toContain("→ Read src/app.ts")
-  expect(test.output.join("")).toContain("[reviewer] > reviewer · gpt-6-sol")
+  expect(test.output.join("")).toContain("reviewer > reviewer · gpt-6-sol")
   expect(test.output.join("")).not.toContain("::group::")
 })
 
