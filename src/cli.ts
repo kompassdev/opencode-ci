@@ -1,6 +1,7 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 import { OpenCode } from "@opencode/sdk"
 import { resolve } from "node:path"
+import { text } from "node:stream/consumers"
 import { run } from "./run"
 
 const args = process.argv.slice(2)
@@ -43,7 +44,7 @@ try {
   timeoutSeconds = Number(value("--timeout") ?? "2700")
   if (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) throw new Error("--timeout must be positive seconds")
   if (args.some((arg) => arg.startsWith("--"))) throw new Error(`Unknown option: ${args.find((arg) => arg.startsWith("--"))}`)
-  const piped = process.stdin.isTTY ? "" : (await Bun.stdin.text()).trim()
+  const piped = process.stdin.isTTY ? "" : (await text(process.stdin)).trim()
   const prompt = [args.join(" "), piped].filter(Boolean).join("\n")
   if (!prompt.trim()) throw new Error(usage)
 
@@ -63,8 +64,12 @@ try {
   process.on("SIGTERM", terminate)
   const timer = setTimeout(() => cancel("timeout"), timeoutSeconds * 1000)
   try {
-    await using opencode = await OpenCode.create()
-    await run(opencode, { directory, model, variant, agent, files, title, thinking, auto, prompt, signal: controller.signal })
+    const opencode = await OpenCode.create()
+    try {
+      await run(opencode, { directory, model, variant, agent, files, title, thinking, auto, prompt, signal: controller.signal })
+    } finally {
+      await opencode.close()
+    }
   } finally {
     clearTimeout(timer)
     process.off("SIGINT", interrupt)

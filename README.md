@@ -1,55 +1,69 @@
-# OpenCode CI client
+# OpenCode CI
 
-A small, noninteractive V2 client built on [`@opencode/sdk`](https://opencode.ai/v2/docs/build/sdk). The SDK embeds OpenCode in the CI process; it does not need a separately managed HTTP service. Output follows `opencode run`'s step headings, completed text, and compact tool lines. Child-session output uses the same format with a `[subagent title]` prefix. The client reconciles persisted messages after execution and fails the job when any session fails. It rejects interactive permission requests rather than waiting forever.
+Run OpenCode V2 in CI with readable logs for the main agent **and subagents**. It uses the [embedded SDK](https://opencode.ai/v2/docs/build/sdk), so you don't need to start an OpenCode server.
 
-Requires Bun and OpenCode V2 credentials. Once published, run without cloning this repository:
+## Quick start
 
-```sh
-bunx @kompassdev/opencode-ci@0.1.0 --directory "$GITHUB_WORKSPACE" --timeout 2400 'Review this pull request'
-```
-
-The `@0.1.0` suffix pins the CI client version, not OpenCode's SDK version. Omit the suffix (or use `@latest`) to follow newer client releases; pin it in CI for reproducibility. The client depends on compatible `@opencode/sdk` 2.x versions starting at 2.0.16.
-
-You can also pipe a multiline prompt on stdin. Options include:
-
-- `--model provider/model#variant` (or `-m`) and `--variant NAME` (uses the default model if `--model` is omitted)
-- `--agent NAME`, `--title TITLE`, and repeated `--file PATH` (or `-f`, 10 MiB maximum per file)
-- `--thinking` to print reasoning blocks when available
-- `--auto` to approve each permission request once; by default CI rejects requests rather than hanging
-- `--timeout SECONDS` (default: 2700)
-
-The checkout must have the OpenCode credentials and project configuration it needs; do not print credentials in CI logs. This client always starts a new session. Unlike `opencode run`, it does not yet implement `--continue`, `--session`, `--fork`, or `--format json`.
-
-Examples of V2 input routing:
+After `0.1.1` is published, use either command from a project with OpenCode credentials configured:
 
 ```sh
-bunx @kompassdev/opencode-ci@0.1.0 '/review the changed tests'  # session.command: executes /review
-bunx @kompassdev/opencode-ci@0.1.0 'Use @review to inspect the changes'  # skill attachment
-bunx @kompassdev/opencode-ci@0.1.0 'Use @skill:review to inspect the changes'  # explicit skill syntax
+npx @kompassdev/opencode-ci 'Review this repository'
+# or
+bunx @kompassdev/opencode-ci 'Review this repository'
 ```
 
-Slash commands are recognized at the beginning of the input. Skill mentions must match IDs returned by the project's skill list. Other `@` mentions remain normal text. Commands and skills are resolved by OpenCode in the selected directory; this client does not read or interpolate their files itself.
+The published CLI requires **Node.js 24+**. `bunx` also requires Bun to launch it. No global install is needed. Pipe a multiline prompt on stdin if you prefer.
 
-Example GitHub Actions step after checkout, Bun setup, and authentication (pin the version in CI):
+## In CI
+
+After checkout, Node setup, and OpenCode authentication:
 
 ```yaml
 - name: Review
-  run: bunx @kompassdev/opencode-ci@0.1.0 --directory "$GITHUB_WORKSPACE" --timeout 2400 '/review'
+  run: npx @kompassdev/opencode-ci@0.1.1 --directory "$GITHUB_WORKSPACE" --timeout 2400 '/review'
   timeout-minutes: 45
 ```
 
-For example, the log can include `> build · gpt-6-sol`, `→ Read src/app.ts`, `$ bun test`, and `[reviewer] → Read src/app.test.ts`. It shows completed text blocks rather than token-by-token deltas. Live subscriptions have no replay, so the client also reads messages after the run without repeating text already printed. For an isolated CI environment, use the SDK rather than connecting to a user's shared background service. See [V2 build options](https://opencode.ai/v2/docs/build/), [SDK](https://opencode.ai/v2/docs/build/sdk), and [HTTP client](https://opencode.ai/v2/docs/build/client).
+Pin `@0.1.1` in CI for reproducibility; omit the version to use the current release. This pins the **CI client**, not its OpenCode SDK dependency (`^2.0.16`). The job needs access to your model credentials and project configuration; don't print credentials in logs.
 
-The SDK exposes tool inputs, outputs, and metadata but not the TUI's private `toolInlineInfo` formatter. This client renders common tools in a similar style, including shell output and edit diffs, with a readable fallback for other tools. On SIGINT or SIGTERM it interrupts the active session, cancels pending API requests, and exits with status 130 or 143 respectively (timeout: 124). A second signal or a ten-second cleanup deadline forces exit.
+Output resembles `opencode run`, with a prefix for child sessions:
 
-## Development and release
+```text
+> build · gpt-6-sol
+→ Read src/app.ts
+[reviewer] > reviewer · gpt-6-sol
+[reviewer] Found a missing assertion in src/app.test.ts.
+The review found one issue.
+```
+
+A failed session fails the job. SIGINT/SIGTERM interrupt the session; timeout defaults to 2700 seconds. Interactive permission requests are rejected by default rather than left waiting.
+
+## Options
+
+| Option | Purpose |
+| --- | --- |
+| `--directory PATH` | Project directory (default: current directory) |
+| `--model provider/model#variant`, `-m` | Select a model and optional variant |
+| `--variant NAME` | Select a variant of the chosen or default model |
+| `--agent NAME` | Select an agent |
+| `--file PATH`, `-f` | Attach a file (repeatable; up to 10 MiB each) |
+| `--thinking` | Show reasoning blocks when available |
+| `--auto` | Approve permission requests once |
+| `--title TITLE` | Set the session title |
+| `--timeout SECONDS` | Set the timeout (default: 2700) |
+
+A leading `/command` runs a project command. `@review` or `@skill:review` attaches the skill named `review` when it exists in the project. The client creates a new session for each invocation; session continuation, forking, and JSON output are not implemented yet.
+
+## Development
+
+The published CLI runs on Node. Building it from this source checkout currently requires Bun:
 
 ```sh
 bun install --frozen-lockfile
 bun test
 bun run typecheck
-npm pack --dry-run   # runs prepack/build and shows the published file list
-npm publish          # requires publish access to @kompassdev; public scoped package
+bun run smoke:node
+npm pack --dry-run
 ```
 
-The npm package ships a Bun executable in `dist/` and declares `@opencode/sdk` as a runtime dependency. The source checkout can be run with `bun start -- 'Review this repository'`. Publishing is a manual step; `prepack` builds the executable for both `npm pack` and `npm publish`.
+`npm publish` builds the package automatically through `prepack` and requires publish access to `@kompassdev`.
