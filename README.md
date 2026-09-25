@@ -18,7 +18,7 @@ From a project with OpenCode credentials configured:
 npx @kompassdev/opencode-ci@0.1.1 'Review this repository'
 ```
 
-Prefer Bun? `bunx @kompassdev/opencode-ci@0.1.1 'Review this repository'` works too. The packaged CLI runs on **Node.js 24+** either way; `bunx` also needs Bun. Version `0.1.1` must be published to npm before either command works.
+Prefer Bun? `bunx @kompassdev/opencode-ci@0.1.1 'Review this repository'` works too. The packaged CLI runs on **Node.js 24+** either way; `bunx` also needs Bun.
 
 Use a project command or skill in the prompt:
 
