@@ -8,6 +8,8 @@ Requires Bun and OpenCode V2 credentials. Once published, run without cloning th
 bunx @kompassdev/opencode-ci@0.1.0 --directory "$GITHUB_WORKSPACE" --timeout 2400 'Review this pull request'
 ```
 
+The `@0.1.0` suffix pins the CI client version, not OpenCode's SDK version. Omit the suffix (or use `@latest`) to follow newer client releases; pin it in CI for reproducibility. The client depends on compatible `@opencode/sdk` 2.x versions starting at 2.0.16.
+
 You can also pipe a multiline prompt on stdin. Options include:
 
 - `--model provider/model#variant` (or `-m`) and `--variant NAME` (uses the default model if `--model` is omitted)

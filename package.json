@@ -24,7 +24,7 @@
     "typecheck": "bunx tsc --noEmit"
   },
   "dependencies": {
-    "@opencode/sdk": "2.0.16"
+    "@opencode/sdk": "^2.0.16"
   },
   "devDependencies": {
     "@types/bun": "latest",
