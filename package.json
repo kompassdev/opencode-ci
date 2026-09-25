@@ -9,10 +9,10 @@
   "files": ["dist", "README.md"],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/kompassdev/opencide-ci.git"
+    "url": "git+https://github.com/kompassdev/opencode-ci.git"
   },
-  "homepage": "https://github.com/kompassdev/opencide-ci#readme",
-  "bugs": "https://github.com/kompassdev/opencide-ci/issues",
+  "homepage": "https://github.com/kompassdev/opencode-ci#readme",
+  "bugs": "https://github.com/kompassdev/opencode-ci/issues",
   "publishConfig": {
     "access": "public"
   },

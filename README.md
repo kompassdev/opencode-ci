@@ -1,32 +1,6 @@
 # OpenCode CI
 
-Run OpenCode V2 in CI with readable logs for the main agent **and subagents**. It uses the [embedded SDK](https://opencode.ai/v2/docs/build/sdk), so you don't need to start an OpenCode server.
-
-## Quick start
-
-After `0.1.1` is published, use either command from a project with OpenCode credentials configured:
-
-```sh
-npx @kompassdev/opencode-ci 'Review this repository'
-# or
-bunx @kompassdev/opencode-ci 'Review this repository'
-```
-
-The published CLI requires **Node.js 24+**. `bunx` also requires Bun to launch it. No global install is needed. Pipe a multiline prompt on stdin if you prefer.
-
-## In CI
-
-After checkout, Node setup, and OpenCode authentication:
-
-```yaml
-- name: Review
-  run: npx @kompassdev/opencode-ci@0.1.1 --directory "$GITHUB_WORKSPACE" --timeout 2400 '/review'
-  timeout-minutes: 45
-```
-
-Pin `@0.1.1` in CI for reproducibility; omit the version to use the current release. This pins the **CI client**, not its OpenCode SDK dependency (`^2.0.16`). The job needs access to your model credentials and project configuration; don't print credentials in logs.
-
-Output resembles `opencode run`, with a prefix for child sessions:
+Run [OpenCode V2](https://opencode.ai/v2/docs/) in CI and see what your subagents are doing. The logs look like `opencode run`, with a prefix on each subagent's output:
 
 ```text
 > build · gpt-6-sol
@@ -36,27 +10,56 @@ Output resembles `opencode run`, with a prefix for child sessions:
 The review found one issue.
 ```
 
-A failed session fails the job. SIGINT/SIGTERM interrupt the session; timeout defaults to 2700 seconds. Interactive permission requests are rejected by default rather than left waiting.
+## Run it
+
+From a project with OpenCode credentials configured:
+
+```sh
+npx @kompassdev/opencode-ci@0.1.1 'Review this repository'
+```
+
+Prefer Bun? `bunx @kompassdev/opencode-ci@0.1.1 'Review this repository'` works too. The packaged CLI runs on **Node.js 24+** either way; `bunx` also needs Bun. Version `0.1.1` must be published to npm before either command works.
+
+Use a project command or skill in the prompt:
+
+```sh
+npx @kompassdev/opencode-ci@0.1.1 '/review the changed tests'
+npx @kompassdev/opencode-ci@0.1.1 'Use @review to inspect the changes'
+```
+
+The command or skill must exist in the project. A leading `/review` runs the command; `@review` attaches the skill. You can also pipe a multiline prompt through stdin.
+
+## GitHub Actions
+
+After checkout, Node setup, and OpenCode authentication:
+
+```yaml
+- name: Review
+  run: npx @kompassdev/opencode-ci@0.1.1 --directory "$GITHUB_WORKSPACE" --timeout 2400 '/review'
+  timeout-minutes: 45
+```
+
+The job needs your model credentials and project configuration. Keep secrets out of the logs. Pin the CLI version in CI so a new release doesn't change the job unexpectedly; omit `@0.1.1` to use the latest published version. The CLI accepts compatible OpenCode SDK 2.x versions (`^2.0.16`).
 
 ## Options
 
-| Option | Purpose |
+| Flag | What it does |
 | --- | --- |
-| `--directory PATH` | Project directory (default: current directory) |
-| `--model provider/model#variant`, `-m` | Select a model and optional variant |
-| `--variant NAME` | Select a variant of the chosen or default model |
-| `--agent NAME` | Select an agent |
-| `--file PATH`, `-f` | Attach a file (repeatable; up to 10 MiB each) |
-| `--thinking` | Show reasoning blocks when available |
-| `--auto` | Approve permission requests once |
+| `--directory PATH` | Work in a project directory (default: current directory) |
+| `--model provider/model#variant`, `-m` | Choose a model and optional variant |
+| `--variant NAME` | Use a variant of the chosen or default model |
+| `--agent NAME` | Choose an agent |
+| `--file PATH`, `-f` | Include a file, up to 10 MiB; repeat for multiple files |
+| `--thinking` | Print reasoning blocks when available |
+| `--auto` | Approve each permission request once |
 | `--title TITLE` | Set the session title |
-| `--timeout SECONDS` | Set the timeout (default: 2700) |
+| `--timeout SECONDS` | Stop after this many seconds (default: 2700) |
 
-A leading `/command` runs a project command. `@review` or `@skill:review` attaches the skill named `review` when it exists in the project. The client creates a new session for each invocation; session continuation, forking, and JSON output are not implemented yet.
+The client starts a new session each time. Without `--auto`, it rejects permission requests rather than waiting for input. A failed session fails the job; SIGINT and SIGTERM interrupt active work. Session continuation, forking, and JSON output aren't supported yet.
 
-## Development
+## Working on this project
 
-The published CLI runs on Node. Building it from this source checkout currently requires Bun:
+The published CLI runs on Node. Building this repository still uses Bun:
 
 ```sh
 bun install --frozen-lockfile
@@ -66,4 +69,4 @@ bun run smoke:node
 npm pack --dry-run
 ```
 
-`npm publish` builds the package automatically through `prepack` and requires publish access to `@kompassdev`.
+`npm publish` builds the package automatically through `prepack`. It requires publish access to `@kompassdev`.
