@@ -19,7 +19,7 @@ export type RunOptions = {
   write?: (text: string) => void
 }
 
-/** Run one CI turn. The caller owns the SDK host and closes it afterwards. */
+/** Run one CI turn against the OpenCode service. */
 export async function run(client: Client, options: RunOptions) {
   const write = options.write ?? ((text: string) => process.stdout.write(text))
   const controller = new AbortController()
@@ -69,9 +69,9 @@ export async function run(client: Client, options: RunOptions) {
     write(prefix(session.label, text))
   }
 
+  const color = () => !process.env.NO_COLOR && (process.stdout.isTTY || process.env.GITHUB_ACTIONS === "true")
   const prefix = (name: string, text: string) => {
-    const color = !process.env.NO_COLOR && (process.stdout.isTTY || process.env.GITHUB_ACTIONS === "true")
-    const label = color ? `\x1b[90m${name}\x1b[0m` : name
+    const label = color() ? `\x1b[90m${name}\x1b[0m` : name
     return text.split("\n").map((row) => row ? `${label} ${row}` : "").join("\n")
   }
 
@@ -86,7 +86,7 @@ export async function run(client: Client, options: RunOptions) {
     if (renderedTools.has(key)) return
     renderedTools.add(key)
     const description = name === "subagent" && typeof input.description === "string" ? input.description : ""
-    const text = renderTool({ name, input, content, metadata, error, directory: options.directory, prefixed: !!description })
+    const text = renderTool({ name, input, content, metadata, error, directory: options.directory, prefixed: !!description, color: color() })
     line(sessionID, description ? prefix(description, text) : text)
   }
 

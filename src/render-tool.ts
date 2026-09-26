@@ -6,6 +6,7 @@ type Tool = {
   error?: string
   directory: string
   prefixed?: boolean
+  color?: boolean
 }
 
 // The SDK exposes tool data, not @opencode/tui's private toolInlineInfo renderer.
@@ -16,7 +17,7 @@ export function renderTool(tool: Tool) {
   const path = text(input.path) || text(input.filePath)
   const file = path.startsWith(tool.directory + "/") ? path.slice(tool.directory.length + 1) : path
   const output = tool.content?.find((item) => item.type === "text")?.text?.trim() ?? ""
-  const count = (value: unknown, label: string) => typeof value === "number" ? ` · ${value} ${label}${value === 1 ? "" : "es"}` : ""
+  const count = (value: unknown, label: string) => typeof value === "number" ? `${value} ${label}${value === 1 ? "" : "es"}` : ""
   const label = (() => {
     if (tool.name === "shell") return { icon: "$", title: text(input.command), body: output }
     if (tool.name === "read") return { icon: "→", title: `Read ${file}` }
@@ -26,11 +27,15 @@ export function renderTool(tool: Tool) {
     if (tool.name === "glob" || tool.name === "grep") {
       const name = tool.name === "glob" ? "Glob" : "Grep"
       const matches = tool.name === "glob" ? tool.metadata?.count : tool.metadata?.matches
-      return { icon: "✱", title: `${name} "${text(input.pattern)}"${file ? ` in ${file}` : ""}${count(matches, "match")}` }
+      const location = file ? `in ${file}` : ""
+      const total = count(matches, "match")
+      return { icon: "✱", title: `${name} "${text(input.pattern)}"`, description: [location, total].filter(Boolean).join(" · ") }
     }
     if (tool.name === "subagent") {
       const agent = (text(input.agent) || text(input.subagent_type) || "unknown").replace(/\b\w/g, (letter) => letter.toUpperCase())
-      return { icon: "✓", title: tool.prefixed ? `${agent} Agent` : `${text(input.description) || `${agent} Subagent`}${input.description ? ` · ${agent} Agent` : ""}` }
+      return tool.prefixed || !input.description
+        ? { icon: "✓", title: tool.prefixed ? `${agent} Agent` : `${agent} Subagent` }
+        : { icon: "✓", title: text(input.description), description: `${agent} Agent` }
     }
     if (tool.name === "skill") return { icon: "→", title: `Skill "${text(tool.metadata?.name) || text(input.id)}"` }
     if (tool.name === "webfetch") return { icon: "%", title: `WebFetch ${text(input.url)}` }
@@ -47,6 +52,8 @@ export function renderTool(tool: Tool) {
   })()
 
   const title = `${tool.error ? "✗" : label.icon} ${label.title}${tool.error ? " failed" : ""}`
+  const description = "description" in label && label.description && !tool.error
+    ? ` ${tool.color ? `\x1b[90m${label.description}\x1b[0m` : label.description}` : ""
   const block = "body" in label && label.body?.trim() && !tool.error
-  return `${block ? "\n" : ""}${title}\n${block ? `${label.body!.trim()}\n\n` : ""}${tool.error ? `${tool.error}\n` : ""}`
+  return `${block ? "\n" : ""}${title}${description}\n${block ? `${label.body!.trim()}\n\n` : ""}${tool.error ? `${tool.error}\n` : ""}`
 }

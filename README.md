@@ -10,13 +10,13 @@ Run [OpenCode V2](https://opencode.ai/v2/docs/) in CI with logs that look like `
 
 ## Run it
 
-From a project with OpenCode credentials configured:
+From a project with the OpenCode V2 CLI installed and credentials configured:
 
 ```sh
-npx @kompassdev/opencode-ci@0.1.3 'Review this repository'
+npx @kompassdev/opencode-ci@0.1.4 'Review this repository'
 ```
 
-Prefer Bun? `bunx @kompassdev/opencode-ci@0.1.3 'Review this repository'` works too. The packaged CLI runs on **Node.js 24+** either way; `bunx` also needs Bun.
+Prefer Bun? `bunx @kompassdev/opencode-ci@0.1.4 'Review this repository'` works too. The packaged CLI runs on **Node.js 24+** either way; `bunx` also needs Bun. Like `opencode run --standalone`, it starts a private OpenCode server for each invocation, using your global and project configuration, model credentials, and plugins, then shuts it down when done.
 
 When the main agent calls a subagent, the log can look like this:
 
@@ -33,23 +33,23 @@ The review found one issue.
 Use a project command or skill in the prompt:
 
 ```sh
-npx @kompassdev/opencode-ci@0.1.3 '/review the changed tests'
-npx @kompassdev/opencode-ci@0.1.3 'Use @review to inspect the changes'
+npx @kompassdev/opencode-ci@0.1.4 '/review the changed tests'
+npx @kompassdev/opencode-ci@0.1.4 'Use @review to inspect the changes'
 ```
 
 The command or skill must exist in the project. You can also pipe a multiline prompt through stdin.
 
 ## GitHub Actions
 
-After checkout, Node setup, and OpenCode authentication:
+After checkout, Node setup, OpenCode V2 CLI installation, and authentication:
 
 ```yaml
 - name: Review
-  run: npx @kompassdev/opencode-ci@0.1.3 --directory "$GITHUB_WORKSPACE" --timeout 2400 '/review'
+  run: npx @kompassdev/opencode-ci@0.1.4 --directory "$GITHUB_WORKSPACE" --timeout 2400 '/review'
   timeout-minutes: 45
 ```
 
-The job needs your model credentials and project configuration. Keep secrets out of the logs. Pin the CLI version in CI so a new release doesn't change the job unexpectedly; omit `@0.1.3` to use the latest published version. The CLI accepts compatible OpenCode SDK 2.x versions (`^2.0.16`).
+The job needs your model credentials and project configuration. Keep secrets out of the logs. Pin the CLI version in CI so a new release doesn't change the job unexpectedly; omit `@0.1.4` to use the latest published version. The CLI accepts compatible OpenCode client 2.x versions (`^2.0.16`).
 
 ## Options
 
@@ -69,7 +69,7 @@ The client starts a new session each time. Without `--auto`, it rejects permissi
 
 ## Working on this project
 
-The published CLI runs on Node. Building this repository still uses Bun:
+The published CLI runs on Node and requires the OpenCode V2 CLI to be installed for its private server. Building this repository still uses Bun:
 
 ```sh
 bun install --frozen-lockfile

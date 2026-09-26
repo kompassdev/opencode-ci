@@ -1,8 +1,9 @@
 #!/usr/bin/env node
-import { OpenCode } from "@opencode/sdk"
+import { OpenCode } from "@opencode/client"
 import { resolve } from "node:path"
 import { text } from "node:stream/consumers"
 import { run } from "./run"
+import { standalone } from "./standalone"
 
 const args = process.argv.slice(2)
 const usage = "Usage: opencode-ci [--directory PATH] [--model provider/model#variant] [--variant NAME] [--agent NAME] [--file PATH] [--title TITLE] [--thinking] [--auto] [--timeout SECONDS] PROMPT (or pipe stdin)"
@@ -64,11 +65,12 @@ try {
   process.on("SIGTERM", terminate)
   const timer = setTimeout(() => cancel("timeout"), timeoutSeconds * 1000)
   try {
-    const opencode = await OpenCode.create()
+    const server = await standalone(controller.signal)
     try {
+      const opencode = OpenCode.make({ baseUrl: server.url, headers: server.headers })
       await run(opencode, { directory, model, variant, agent, files, title, thinking, auto, prompt, signal: controller.signal })
     } finally {
-      await opencode.close()
+      await server.close()
     }
   } finally {
     clearTimeout(timer)
