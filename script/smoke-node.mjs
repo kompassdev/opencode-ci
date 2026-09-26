@@ -10,12 +10,18 @@ import packageJSON from "../package.json" with { type: "json" }
 const help = spawnSync(process.execPath, ["dist/cli.js", "--help"], { encoding: "utf8" })
 assert.equal(help.status, 0, help.stderr)
 assert.match(help.stdout, /Usage: opencode-ci/)
+const runHelp = spawnSync(process.execPath, ["dist/cli.js", "run", "--help"], { encoding: "utf8" })
+assert.equal(runHelp.status, 0, runHelp.stderr)
+assert.match(runHelp.stdout, /--auth-output/)
 const version = spawnSync(process.execPath, ["dist/cli.js", "--version"], { encoding: "utf8" })
 assert.equal(version.status, 0, version.stderr)
 assert.equal(version.stdout.trim(), packageJSON.version)
 const missingCommand = spawnSync(process.execPath, ["dist/cli.js", "Hello"], { encoding: "utf8" })
 assert.equal(missingCommand.status, 1, missingCommand.stderr)
-assert.match(missingCommand.stderr, /Usage: opencode-ci run/)
+assert.match(missingCommand.stderr, /unknown command 'Hello'/)
+const conflict = spawnSync(process.execPath, ["dist/cli.js", "run", "--auth-file", "unused.json", "--auth-env", "TEST_AUTH", "Hello"], { encoding: "utf8" })
+assert.equal(conflict.status, 1, conflict.stderr)
+assert.match(conflict.stderr, /cannot be used with option/)
 
 const invalid = spawnSync(process.execPath, ["dist/cli.js", "run", "--model", "invalid", "Hello"], {
   encoding: "utf8", timeout: 60_000,
@@ -43,13 +49,15 @@ try {
   await host.close()
   const db = new DatabaseSync(dbPath)
   try {
-    db.prepare(`INSERT INTO credential (id, integration_id, label, value, active, time_created, time_updated)
-      VALUES (?, ?, ?, ?, 1, ?, ?)`).run("cred_test", "openai", "OAuth", JSON.stringify(auth.openai), Date.now(), Date.now())
+    const insert = db.prepare(`INSERT INTO credential (id, integration_id, label, value, active, time_created, time_updated)
+      VALUES (?, ?, ?, ?, 1, ?, ?)`)
+    insert.run("cred_test_openai", "openai", "OAuth", JSON.stringify(auth.openai), Date.now(), Date.now())
+    insert.run("cred_test_anthropic", "anthropic", "Key", JSON.stringify(auth.anthropic), Date.now(), Date.now())
   } finally { db.close() }
   const exported = join(temp, "export.json")
-  const result = spawnSync(process.execPath, ["dist/cli.js", "auth", "export", "--db", dbPath, "--integration", "openai", "--output", exported], { encoding: "utf8" })
+  const result = spawnSync(process.execPath, ["dist/cli.js", "auth", "export", "--db", dbPath, "--integration", "openai", "--integration", "anthropic", "--output", exported], { encoding: "utf8" })
   assert.equal(result.status, 0, result.error?.message ?? result.stderr)
-  assert.deepEqual(JSON.parse(readFileSync(exported, "utf8")), { openai: auth.openai })
+  assert.deepEqual(JSON.parse(readFileSync(exported, "utf8")), auth)
   assert.equal(statSync(exported).mode & 0o777, 0o600)
 } finally { rmSync(temp, { recursive: true, force: true }) }
 console.log("Node CLI and embedded OpenCode SDK smoke test passed")

@@ -1,47 +1,65 @@
 # OpenCode CI
 
-Run [OpenCode V2](https://opencode.ai/v2/docs/) in CI with logs that look like `opencode run`.
+Run [OpenCode V2](https://opencode.ai/v2/docs/) in CI with:
 
-## What it adds to `opencode run`
+- **Subagent output** — see child agents' steps and responses in the log.
+- **`/commands`** — run project commands from a prompt.
+- **`@skills`** — attach project skills by mentioning them.
+- **OAuth via `auth.json`** — use a ChatGPT Plus/Pro (Codex) login in CI instead of an API key.
 
-- **Subagent output:** `run` shows the subagent tool call, but not the child's transcript. This client prints the child's steps, tools, and text with a dim-colored subagent name prefix in terminals and GitHub Actions (plain text in other redirected logs).
-- **Slash commands:** A prompt starting with `/review` runs the project's `review` command instead of sending `/review` as plain text.
-- **Skill mentions:** `@review` or `@skill:review` attaches the `review` skill when it exists in the project. `run` sends those mentions as plain text.
+## Quick start
 
-## Run it
+Sign in to OpenCode with `opencode auth login openai` and choose **ChatGPT Pro/Plus (headless)**, then [export that login to `auth.json`](#export-your-local-opencode-login). Run the client without a global installation:
 
-Run it with `npx` and provide a model provider API key through the environment, or use an existing OpenAI OAuth credential (below):
+### Subagent output
 
 ```sh
-OPENAI_API_KEY=... npx @kompassdev/opencode-ci run --model openai/gpt-6-luna 'Review this repository'
+npx @kompassdev/opencode-ci run --auth-file=auth.json --model openai/gpt-6-luna 'Have a subagent review the tests, then summarize its findings'
 ```
 
-`npx` downloads the package and its SDK dependency when needed; it does not require a global installation. Prefer Bun? `bunx @kompassdev/opencode-ci run 'Review this repository'` works too. The packaged client runs on **Node.js 24+** either way; `bunx` also needs Bun.
-
-Commands are `run`, `auth export`, and `--version`.
-
-`opencode-ci` embeds OpenCode with `@opencode/sdk`: no OpenCode CLI, running service, or network server is required. It reads your global and project configuration and plugins, but uses a fresh, isolated credential database for each invocation. Supply supported provider API-key environment variables or an auth JSON file; it does **not** use your locally saved OpenCode logins. The SDK dependency is pinned because OpenCode does not yet expose a public credential import API.
-
-When the main agent calls a subagent, the log can look like this:
+When the agent calls a subagent, its steps and text appear in the log (unlike `opencode run`, which shows only the tool call):
 
 ```text
 > build · gpt-6-sol
 → Read src/app.ts
-reviewer > reviewer · gpt-6-sol
-reviewer → Read src/app.test.ts
-reviewer Found a missing assertion in src/app.test.ts.
-reviewer ✓ Reviewer Agent
+Review tests > general · gpt-6-sol
+Review tests → Read src/app.test.ts
+Review tests Found a missing assertion in src/app.test.ts.
+Review tests ✓ General Agent
 The review found one issue.
 ```
 
-Use a project command or skill in the prompt:
+Child output streams as events arrive, including events from overlapping subagents. Recovering missed child messages does not pause the live event stream; saved messages are printed before that subagent's completion line.
+
+### `/command`
+
+Run a command defined in your OpenCode project:
 
 ```sh
-npx @kompassdev/opencode-ci run '/review the changed tests'
-npx @kompassdev/opencode-ci run 'Use @review to inspect the changes'
+npx @kompassdev/opencode-ci run --auth-file=auth.json '/review the changed tests'
 ```
 
-The command or skill must exist in the project. You can also pipe a multiline prompt through stdin.
+### `@skill`
+
+Attach a skill defined in your OpenCode project. This example uses `bunx` instead of `npx`:
+
+```sh
+bunx @kompassdev/opencode-ci run --auth-file=auth.json 'Use @review to inspect the changes'
+```
+
+`@skill:review` also works. The command or skill must exist in the project.
+
+### `auth.json`
+
+Use your exported OAuth login without putting tokens in command arguments:
+
+```sh
+npx @kompassdev/opencode-ci run --auth-file=auth.json --model openai/gpt-6-luna 'Review this repository'
+```
+
+See [exporting your login](#export-your-local-opencode-login) and [saving refreshed tokens](#auth-json-format-and-token-refresh) below. Keep `auth.json` out of version control.
+
+`npx` downloads the package and its SDK dependency when needed. The packaged client requires **Node.js 24+** even when launched with `bunx` (which also requires Bun). You can pipe a multiline prompt through stdin. `opencode-ci` embeds OpenCode with `@opencode/sdk`, so it needs no installed OpenCode CLI or running service. It reads your global and project configuration and plugins, but uses an isolated credential database per invocation: it does **not** automatically use your locally saved OpenCode logins.
 
 ## GitHub Actions
 
@@ -65,13 +83,38 @@ jobs:
       - name: Review
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-        run: npx @kompassdev/opencode-ci run --model openrouter/anthropic/claude-sonnet-4 --directory "$GITHUB_WORKSPACE" --timeout 2400 'Review this repository for correctness and missing tests'
+        run: npx @kompassdev/opencode-ci run --model openrouter/anthropic/claude-sonnet-4 'Review this repository for correctness and missing tests'
         timeout-minutes: 45
 ```
 
 Add `OPENROUTER_API_KEY` as a repository secret, or replace the model and secret with your provider's setup. Pin npm package versions in a production workflow. Keep secrets out of logs; GitHub does not provide repository secrets to workflows triggered by pull requests from forks.
 
-### Auth JSON
+## Command options
+
+Commands are `run`, `auth export`, and `--version`. For example:
+
+```sh
+npx @kompassdev/opencode-ci run --auth-file=auth.json --model openai/gpt-6-luna --agent build 'Review the changed files'
+```
+
+| `run` flag | What it does |
+| --- | --- |
+| `--directory PATH` | Work in a project directory (default: current directory) |
+| `--model provider/model#variant`, `-m` | Choose a model and optional variant |
+| `--variant NAME` | Use a variant of the chosen or default model |
+| `--agent NAME` | Choose an agent |
+| `--file PATH`, `-f` | Include a file, up to 10 MiB; repeat for multiple files |
+| `--thinking` | Print reasoning blocks when available |
+| `--auto` | Approve each permission request once |
+| `--title TITLE` | Set the session title |
+| `--timeout SECONDS` | Stop after this many seconds (default: 2700) |
+| `--auth-env NAME` | Read auth JSON from an environment variable |
+| `--auth-file PATH` | Read auth JSON from a file (instead of `--auth-env`) |
+| `--auth-output PATH` | Save the potentially refreshed auth JSON to a file after the run |
+
+The client starts a new session each time. Without `--auto`, it rejects permission requests rather than waiting for input. A failed session fails the job; SIGINT and SIGTERM interrupt active work. Session continuation, forking, and JSON output aren't supported yet.
+
+## Auth JSON format and token refresh
 
 Use a single JSON object keyed by OpenCode **integration ID**, with one active credential per integration. The two supported credential types are `oauth` and `key`:
 
@@ -91,7 +134,7 @@ Use a single JSON object keyed by OpenCode **integration ID**, with one active c
 
 `expires` is a Unix timestamp in milliseconds. OAuth `methodID` and provider-specific `metadata` must match the integration's authentication method; `metadata` is optional. Key credentials can also have `metadata` and `configuration` objects where the integration needs them. For common API-key providers, their native environment variable (such as `ANTHROPIC_API_KEY`) is simpler than including a key in this file. The legacy OpenAI `{ "openai": { "type": "oauth", "access": "...", "refresh": "...", "expires": 1234567890000, "accountId": "..." } }` format is accepted on input and converted to the new format on output.
 
-#### Export your local OpenCode login
+### Export your local OpenCode login
 
 After signing in with the OpenCode V2 CLI, export the preferred credential for `openai` (or another integration) from its local database:
 
@@ -105,6 +148,8 @@ npx @kompassdev/opencode-ci auth export \
 The export **reads the database without changing it** and writes `auth.json` with owner-only permissions (0600). Repeat `--integration ID` to include more than one integration. It selects the active credential, or the newest when none is marked active. Only saved key and OAuth credentials can be exported; environment-based connections have no stored credential. If OpenCode is installed under a different command name or you know the database location, pass its path to `--db` directly. The output is sensitive: do not commit or print it. Add `auth.json` to your project's `.gitignore`. For a repository you control, upload it with `gh secret set OPENCODE2_AUTH < auth.json`, then delete your local copy when no longer needed.
 
 Pass the JSON through `--auth-file PATH` or `--auth-env NAME`; do not put secrets directly in CLI arguments. `--auth-output PATH` writes the current credentials to a mode-0600 file after the run, including refreshed OAuth tokens, even when the session fails. The output contains only the integrations supplied on input.
+
+### GitHub Actions with OAuth
 
 For example, store the **entire JSON object** as a repository secret named `OPENCODE2_AUTH`, then use this workflow. It does not need OpenCode installed; `npx` fetches the client and SDK. `PAT_TOKEN` must be allowed to update repository Actions secrets:
 
@@ -147,25 +192,6 @@ jobs:
 For a local file instead, run `npx @kompassdev/opencode-ci run --auth-file auth.json --auth-output auth.json --model openai/gpt-6-luna 'Reply OK'`. Keep `auth.json` out of version control. The credential bundle is never printed by the CLI. The credentials are isolated to each invocation; a later run must provide the updated bundle. Pin the `npx` package version for production CI.
 
 **Use a secret, not Actions cache, for OAuth tokens.** Cache entries can be read by workflows in their cache scope, are immutable and subject to eviction, and are not designed for rotating credentials. GitHub's default `GITHUB_TOKEN` cannot update Actions secrets; use a suitably scoped PAT or GitHub App token for the save step. Do not expose the secret or the save token to untrusted pull requests. Runs that share a refresh token must not overlap: use the same concurrency group across those workflows, or a central credential store. If a provider invalidates idle refresh tokens, add a scheduled keep-alive run that loads and saves the same secret.
-
-## Options
-
-| Flag | What it does |
-| --- | --- |
-| `--directory PATH` | Work in a project directory (default: current directory) |
-| `--model provider/model#variant`, `-m` | Choose a model and optional variant |
-| `--variant NAME` | Use a variant of the chosen or default model |
-| `--agent NAME` | Choose an agent |
-| `--file PATH`, `-f` | Include a file, up to 10 MiB; repeat for multiple files |
-| `--thinking` | Print reasoning blocks when available |
-| `--auto` | Approve each permission request once |
-| `--title TITLE` | Set the session title |
-| `--timeout SECONDS` | Stop after this many seconds (default: 2700) |
-| `--auth-env NAME` | Read auth JSON from an environment variable |
-| `--auth-file PATH` | Read auth JSON from a file (instead of `--auth-env`) |
-| `--auth-output PATH` | Save the potentially refreshed auth JSON to a file after the run |
-
-The client starts a new session each time. Without `--auto`, it rejects permission requests rather than waiting for input. A failed session fails the job; SIGINT and SIGTERM interrupt active work. Session continuation, forking, and JSON output aren't supported yet.
 
 ## Working on this project
 

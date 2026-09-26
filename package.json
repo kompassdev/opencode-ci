@@ -1,6 +1,6 @@
 {
   "name": "@kompassdev/opencode-ci",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "OpenCode V2 CI runner with subagent output and command/skill support",
   "type": "module",
   "bin": {
@@ -21,14 +21,15 @@
   },
   "scripts": {
     "start": "bun src/cli.ts",
-    "build": "bun build ./src/cli.ts --target node --external @opencode/sdk --outdir dist",
+    "build": "bun build ./src/cli.ts --target node --external @opencode/sdk --external commander --outdir dist",
     "smoke:node": "bun run build && node script/smoke-node.mjs",
     "prepack": "bun run build",
     "test": "bun test",
     "typecheck": "bunx tsc --noEmit"
   },
   "dependencies": {
-    "@opencode/sdk": "2.0.16"
+    "@opencode/sdk": "2.0.16",
+    "commander": "15.0.0"
   },
   "devDependencies": {
     "@types/bun": "latest",

@@ -90,6 +90,67 @@ export async function run(client: Client, options: RunOptions) {
     line(sessionID, description ? prefix(description, text) : text)
   }
 
+  const children = new Map<string, string[]>()
+  const discover = async (parentID: string) => {
+    const result = await client.session.list({ parentID, limit: 200 }, { signal: options.signal })
+    children.set(parentID, result.data.map((child) => child.id))
+    for (const child of result.data) sessions.set(child.id, { label: child.title ?? child.id, parentID })
+  }
+
+  const replay = async (id: string) => {
+    let cursor: string | undefined
+    const messages = [] as Awaited<ReturnType<Client["message"]["list"]>>["data"][number][]
+    do {
+      const page = await client.message.list({ sessionID: id, limit: 200, ...(cursor ? { cursor } : { order: "desc" }) }, { signal: options.signal })
+      messages.push(...page.data)
+      cursor = page.cursor.next ?? undefined
+    } while (cursor)
+    for (const message of messages.reverse()) {
+      if (message.type !== "assistant") continue
+      if (message.content.length) heading(id, message.id, message.agent, message.model.id)
+      let ordinal = 0
+      let reasoningOrdinal = 0
+      for (const content of message.content) {
+        if (content.type === "text") print(id, message.id, ordinal++, content.text)
+        if (content.type === "reasoning") reasoning(id, message.id, reasoningOrdinal++, content.text)
+        if (content.type === "tool" && (content.state.status === "completed" || content.state.status === "error")) {
+          if (content.name === "subagent") await flushChild(id, content.state.input, content.state.metadata)
+          toolLine(id, message.id, content.id, content.name, content.state.input, content.state.content, content.state.metadata,
+            content.state.status === "error" ? content.state.error.message : undefined)
+        }
+      }
+      if (message.error) failure = new Error(message.error.message)
+    }
+  }
+
+  const flushing = new Map<string, Promise<void>>()
+  const flushChild = async (parentID: string, input: Record<string, unknown>, metadata?: Record<string, unknown>) => {
+    const description = input.description
+    if (typeof description !== "string") return
+    // Tool metadata identifies the exact child, even when multiple calls use
+    // the same description. Fall back to matching session titles for older data.
+    const childID = typeof metadata?.sessionID === "string" ? metadata.sessionID : undefined
+    if (!childID || !sessions.has(childID)) await discover(parentID)
+    for (const id of childID ? [childID] : children.get(parentID) ?? []) {
+      if (!childID && sessions.get(id)?.label !== description) continue
+      if (!sessions.has(id)) sessions.set(id, { label: description, parentID })
+      let pending = flushing.get(id)
+      if (!pending) {
+        pending = (async () => {
+          await client.session.wait({ sessionID: id }, { signal: options.signal })
+          await replay(id)
+        })()
+        flushing.set(id, pending)
+      }
+      await pending
+    }
+  }
+
+  const finishing = new Set<Promise<void>>()
+  const drainFinishes = async () => {
+    while (finishing.size) await Promise.all(finishing)
+  }
+
   const consume = (async () => {
     while (!controller.signal.aborted) {
       const item = await events.next()
@@ -122,7 +183,15 @@ export async function run(client: Client, options: RunOptions) {
         const key = `${event.data.assistantMessageID}:${event.data.id}`
         const tool = tools.get(key)
         tools.delete(key)
-        toolLine(event.data.sessionID, event.data.assistantMessageID, event.data.id, tool?.name ?? "tool", tool?.input ?? {}, event.data.content, event.data.metadata, event.type === "session.tool.failed" ? event.data.error.message : undefined)
+        const finish = () => toolLine(event.data.sessionID, event.data.assistantMessageID, event.data.id, tool?.name ?? "tool", tool?.input ?? {}, event.data.content, event.data.metadata, event.type === "session.tool.failed" ? event.data.error.message : undefined)
+        if (tool?.name === "subagent") {
+          // Recovery can involve I/O. Do not stop reading other children's live events.
+          const pending = flushChild(event.data.sessionID, tool.input, event.data.metadata).then(finish).catch((error: unknown) => {
+            failure ??= error instanceof Error ? error : new Error(String(error))
+          })
+          finishing.add(pending)
+          void pending.finally(() => finishing.delete(pending))
+        } else finish()
       }
       if (event.type === "session.execution.failed") {
         line(event.data.sessionID, `Error: ${event.data.error.message}\n`)
@@ -199,17 +268,15 @@ export async function run(client: Client, options: RunOptions) {
     checkCancelled()
     await client.session.wait({ sessionID: rootID }, { signal: options.signal })
     checkCancelled()
+    await drainFinishes()
 
     // Child sessions are separate streams. Reconcile persisted messages as well as
     // live events so fast children and event-stream gaps do not hide their output.
     const pending = [rootID]
     for (const id of pending) {
       checkCancelled()
-      const children = await client.session.list({ parentID: id, limit: 200 }, { signal: options.signal })
-      for (const child of children.data) {
-        sessions.set(child.id, { label: child.title ?? child.id, parentID: id })
-        if (!pending.includes(child.id)) pending.push(child.id)
-      }
+      await discover(id)
+      for (const child of children.get(id) ?? []) if (!pending.includes(child)) pending.push(child)
     }
     for (const id of pending.slice(1)) {
       checkCancelled()
@@ -217,33 +284,12 @@ export async function run(client: Client, options: RunOptions) {
     }
     for (const id of pending) {
       checkCancelled()
-      let cursor: string | undefined
-      const messages = [] as Awaited<ReturnType<Client["message"]["list"]>>["data"][number][]
-      do {
-        const page = await client.message.list({ sessionID: id, limit: 200, ...(cursor ? { cursor } : { order: "desc" }) }, { signal: options.signal })
-        messages.push(...page.data)
-        cursor = page.cursor.next ?? undefined
-      } while (cursor)
-      for (const message of messages.reverse()) {
-        if (message.type !== "assistant") continue
-        // Match run's step header even when a fast step finished before the live subscription saw it.
-        if (message.content.length && !printed.has(`${message.id}:text:0`)) heading(id, message.id, message.agent, message.model.id)
-        let ordinal = 0
-        let reasoningOrdinal = 0
-        for (const content of message.content) {
-          if (content.type === "text") print(id, message.id, ordinal++, content.text)
-          if (content.type === "reasoning") reasoning(id, message.id, reasoningOrdinal++, content.text)
-          if (content.type === "tool" && (content.state.status === "completed" || content.state.status === "error")) {
-            toolLine(id, message.id, content.id, content.name, content.state.input, content.state.content, content.state.metadata,
-              content.state.status === "error" ? content.state.error.message : undefined)
-          }
-        }
-        if (message.error) failure = new Error(message.error.message)
-      }
+      await replay(id)
       const result = await client.session.get({ sessionID: id }, { signal: options.signal })
       if (result.outcome === "failed" || result.outcome === "interrupted")
         failure ??= new Error(`Session ${id} ${result.outcome}`)
     }
+    await drainFinishes()
     checkCancelled()
     if (failure) throw failure
     return session.id

@@ -4,27 +4,50 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { resolveModel, run } from "../src/run"
 
-function fixture(input: { prompt: string; children?: boolean; childFailed?: boolean; tool?: boolean; subagent?: boolean; model?: string; variant?: string; thinking?: boolean; auto?: boolean; files?: string[]; signal?: AbortSignal; waitForAbort?: boolean; paginated?: boolean }) {
+function fixture(input: { prompt: string; children?: boolean; parallel?: boolean; sameTitle?: boolean; holdRecovery?: boolean; holdSecondChild?: boolean; events?: Array<{ type: string; data: Record<string, unknown> }>; childFailed?: boolean; tool?: boolean; subagent?: boolean; model?: string; variant?: string; thinking?: boolean; auto?: boolean; files?: string[]; signal?: AbortSignal; waitForAbort?: boolean; paginated?: boolean }) {
   const calls: { create?: unknown; command?: unknown; prompt?: unknown; interrupted?: string; messages: unknown[] } = { messages: [] }
   const output: string[] = []
+  let releaseEvents = () => {}
+  const prompted = new Promise<void>((resolve) => { releaseEvents = resolve })
+  let finishEvents = () => {}
+  const eventsDone = new Promise<void>((resolve) => { finishEvents = resolve })
+  let releaseRecovery = () => {}
+  const recoveryReleased = new Promise<void>((resolve) => { releaseRecovery = resolve })
+  let held = false
+  let releaseSecondChild = () => {}
+  const secondChildReleased = new Promise<void>((resolve) => { releaseSecondChild = resolve })
   const client = {
     event: {
       subscribe: async function* (options: { signal: AbortSignal }) {
         yield { type: "server.connected", data: {} }
+        if (input.events) {
+          await prompted
+          for (const event of input.events) yield event
+          finishEvents()
+        }
         await new Promise<void>((resolve) => options.signal.addEventListener("abort", () => resolve(), { once: true }))
       },
     },
     session: {
       create: async (value: unknown) => { calls.create = value; return { id: "root" } },
       command: async (value: unknown) => { calls.command = value },
-      prompt: async (value: unknown) => { calls.prompt = value },
-      wait: async (_: unknown, options?: { signal?: AbortSignal }) => {
+      prompt: async (value: unknown) => { calls.prompt = value; releaseEvents() },
+      wait: async ({ sessionID }: { sessionID: string }, options?: { signal?: AbortSignal }) => {
+        if (input.holdSecondChild && sessionID === "child_two") await secondChildReleased
+        if (input.events) await eventsDone
         if (!input.waitForAbort) return
         await new Promise<void>((_, reject) => options?.signal?.addEventListener("abort", () => reject(options.signal?.reason), { once: true }))
       },
-      list: async ({ parentID }: { parentID: string }) => ({
-        data: input.children && parentID === "root" ? [{ id: "child", title: "reviewer" }] : [],
-      }),
+      list: async ({ parentID }: { parentID: string }) => {
+        if (input.holdRecovery && parentID === "root" && !held) {
+          held = true
+          await recoveryReleased
+        }
+        return { data: input.parallel && parentID === "root" ? [
+          { id: "child_one", title: input.sameTitle ? "Say hi to user" : "Say hi from agent one" },
+          { id: "child_two", title: input.sameTitle ? "Say hi to user" : "Say hi from agent two" },
+        ] : input.children && parentID === "root" ? [{ id: "child", title: "reviewer" }] : [] }
+      },
       get: async ({ sessionID }: { sessionID: string }) => ({ outcome: sessionID === "child" && input.childFailed ? "failed" : "succeeded" }),
       interrupt: async ({ sessionID }: { sessionID: string }) => { calls.interrupted = sessionID },
     },
@@ -36,11 +59,12 @@ function fixture(input: { prompt: string; children?: boolean; childFailed?: bool
         calls.messages.push(params)
         if (params.cursor && params.order) throw new Error("Cursor cannot be combined with order")
         return {
-          data: params.sessionID === "child"
-            ? [{ id: "msg_child", type: "assistant", agent: "reviewer", model: { id: "gpt-6-sol" }, content: [{ type: "text", text: "child findings" }] }]
+          data: params.sessionID.startsWith("child")
+            ? [{ id: `msg_${params.sessionID}`, type: "assistant", agent: input.parallel ? "general" : "reviewer", model: { id: "gpt-6-sol" }, content: [{ type: "text", text: input.parallel ? `Hello from ${params.sessionID}` : "child findings" }] }]
             : [{ id: "msg_root", type: "assistant", agent: "build", model: { id: "gpt-6-sol" }, content: [
               ...(input.tool ? [{ type: "tool", id: "tool_1", name: "read", state: { status: "completed", input: { path: "/workspace/src/app.ts" }, content: [{ type: "text", text: "contents" }] } }] : []),
               ...(input.subagent ? [{ type: "tool", id: "tool_2", name: "subagent", state: { status: "completed", input: { agent: "general", description: "reviewer" }, content: [] } }] : []),
+              ...(input.parallel ? ["one", "two"].map((name) => ({ type: "tool", id: `tool_${name}`, name: "subagent", state: { status: "completed", input: { agent: "general", description: input.sameTitle ? "Say hi to user" : `Say hi from agent ${name}` }, metadata: { sessionID: `child_${name}` }, content: [] } })) : []),
               ...(input.thinking ? [{ type: "reasoning", text: "checking changes" }] : []),
               { type: "text", text: "summary" },
             ] }],
@@ -51,7 +75,11 @@ function fixture(input: { prompt: string; children?: boolean; childFailed?: bool
   }
   const execute = () => run(client as unknown as Parameters<typeof run>[0], {
     directory: "/workspace", prompt: input.prompt, model: input.model, variant: input.variant,
-    thinking: input.thinking, auto: input.auto, files: input.files, signal: input.signal, write: (text) => output.push(text),
+    thinking: input.thinking, auto: input.auto, files: input.files, signal: input.signal, write: (text) => {
+      output.push(text)
+      if (text.includes("Say hi from agent two Hello")) releaseRecovery()
+      if (text.includes("Say hi to user ✓")) releaseSecondChild()
+    },
   })
   return { execute, calls, output }
 }
@@ -100,6 +128,71 @@ test("prefixes the subagent finish without repeating its name", async () => {
   expect(output).not.toContain("✓ reviewer")
   expect(output).not.toContain("\n\n")
 })
+
+test("replays each parallel child's transcript before its completion when child events are missed", async () => {
+  const test = fixture({ prompt: "Say hi in parallel", parallel: true })
+  await test.execute()
+  const lines = test.output.join("").split("\n")
+  for (const name of ["one", "two"]) {
+    const prefix = `Say hi from agent ${name} `
+    const heading = lines.findIndex((line) => line.startsWith(`${prefix}> general ·`))
+    const text = lines.findIndex((line) => line === `${prefix}Hello from child_${name}`)
+    const finish = lines.findIndex((line) => line.startsWith(`${prefix}✓ General Agent`))
+    expect(heading).toBeGreaterThan(-1)
+    expect(heading).toBeLessThan(text)
+    expect(text).toBeLessThan(finish)
+    expect(lines.filter((line) => line.startsWith(`${prefix}✓`))).toHaveLength(1)
+  }
+})
+
+test("streams interleaved children and flushes missed child output before a live finish", async () => {
+  const child = (id: string, title: string) => ({ type: "session.created", data: { sessionID: id, parentID: "root", title } })
+  const step = (id: string) => ({ type: "session.step.started", data: { sessionID: id, assistantMessageID: `msg_${id}`, agent: "general", model: { id: "gpt-6-sol" } } })
+  const tool = (id: string, name: string) => ({ type: "session.tool.input.started", data: { sessionID: "root", assistantMessageID: "msg_root", id, name: "subagent" } })
+  const called = (id: string, name: string) => ({ type: "session.tool.called", data: { sessionID: "root", assistantMessageID: "msg_root", id, input: { agent: "general", description: `Say hi from agent ${name}` } } })
+  const success = (id: string) => ({ type: "session.tool.success", data: { sessionID: "root", assistantMessageID: "msg_root", id, content: [] } })
+  const test = fixture({ prompt: "Say hi in parallel", parallel: true, events: [
+    child("child_one", "Say hi from agent one"), child("child_two", "Say hi from agent two"),
+    tool("tool_one", "one"), called("tool_one", "one"), tool("tool_two", "two"), called("tool_two", "two"),
+    step("child_one"), step("child_two"),
+    { type: "session.text.ended", data: { sessionID: "child_two", assistantMessageID: "msg_child_two", ordinal: 0, text: "Hello from child_two" } },
+    success("tool_two"), success("tool_one"),
+  ] })
+  await test.execute()
+  const output = test.output.join("")
+  expect(output.indexOf("Say hi from agent one > general")).toBeLessThan(output.indexOf("Say hi from agent two > general"))
+  expect(output.indexOf("Say hi from agent two Hello")).toBeLessThan(output.indexOf("Say hi from agent two ✓"))
+  expect(output.indexOf("Say hi from agent one Hello")).toBeLessThan(output.indexOf("Say hi from agent one ✓"))
+  expect(output.match(/✓ General Agent/g)).toHaveLength(2)
+})
+
+test("keeps reading the other child's live events while completion recovery is waiting", async () => {
+  const test = fixture({ prompt: "Say hi in parallel", parallel: true, holdRecovery: true, events: [
+    { type: "session.created", data: { sessionID: "child_two", parentID: "root", title: "Say hi from agent two" } },
+    { type: "session.step.started", data: { sessionID: "child_two", assistantMessageID: "msg_child_two", agent: "general", model: { id: "gpt-6-sol" } } },
+    { type: "session.tool.input.started", data: { sessionID: "root", assistantMessageID: "msg_root", id: "tool_one", name: "subagent" } },
+    { type: "session.tool.called", data: { sessionID: "root", assistantMessageID: "msg_root", id: "tool_one", input: { agent: "general", description: "Say hi from agent one" } } },
+    { type: "session.tool.success", data: { sessionID: "root", assistantMessageID: "msg_root", id: "tool_one", content: [] } },
+    { type: "session.text.ended", data: { sessionID: "child_two", assistantMessageID: "msg_child_two", ordinal: 0, text: "Hello from child_two" } },
+  ] })
+  await test.execute()
+  const output = test.output.join("")
+  expect(output.indexOf("Say hi from agent two Hello")).toBeLessThan(output.indexOf("Say hi from agent one ✓"))
+  expect(output.match(/✓ General Agent/g)).toHaveLength(2)
+}, 2000)
+
+test("uses the child session ID when parallel calls share a description", async () => {
+  const test = fixture({ prompt: "Say hi in parallel", parallel: true, sameTitle: true, holdSecondChild: true, events: [
+    { type: "session.tool.input.started", data: { sessionID: "root", assistantMessageID: "msg_root", id: "tool_one", name: "subagent" } },
+    { type: "session.tool.called", data: { sessionID: "root", assistantMessageID: "msg_root", id: "tool_one", input: { agent: "general", description: "Say hi to user" } } },
+    { type: "session.tool.success", data: { sessionID: "root", assistantMessageID: "msg_root", id: "tool_one", metadata: { sessionID: "child_one" }, content: [] } },
+  ] })
+  await test.execute()
+  const output = test.output.join("")
+  expect(output.indexOf("Say hi to user Hello from child_one")).toBeLessThan(output.indexOf("Say hi to user ✓"))
+  expect(output.indexOf("Say hi to user ✓")).toBeLessThan(output.indexOf("Say hi to user Hello from child_two"))
+  expect(output.match(/✓ General Agent/g)).toHaveLength(2)
+}, 2000)
 
 test("uses the colored prefix in GitHub Actions unless NO_COLOR is set", async () => {
   const descriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY")
