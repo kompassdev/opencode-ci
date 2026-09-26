@@ -85,7 +85,7 @@ export async function run(client: Client, options: RunOptions) {
     const key = `${messageID}:${id}`
     if (renderedTools.has(key)) return
     renderedTools.add(key)
-    const description = name === "subagent" && typeof input.description === "string" ? input.description : ""
+    const description = (name === "subagent" || name === "task") && typeof input.description === "string" ? input.description : ""
     const text = renderTool({ name, input, content, metadata, error, directory: options.directory, prefixed: !!description, color: color() })
     line(sessionID, description ? prefix(description, text) : text)
   }
@@ -114,7 +114,7 @@ export async function run(client: Client, options: RunOptions) {
         if (content.type === "text") print(id, message.id, ordinal++, content.text)
         if (content.type === "reasoning") reasoning(id, message.id, reasoningOrdinal++, content.text)
         if (content.type === "tool" && (content.state.status === "completed" || content.state.status === "error")) {
-          if (content.name === "subagent") await flushChild(id, content.state.input, content.state.metadata)
+          if (content.name === "subagent" || content.name === "task") await flushChild(id, content.state.input, content.state.metadata)
           toolLine(id, message.id, content.id, content.name, content.state.input, content.state.content, content.state.metadata,
             content.state.status === "error" ? content.state.error.message : undefined)
         }
@@ -184,7 +184,7 @@ export async function run(client: Client, options: RunOptions) {
         const tool = tools.get(key)
         tools.delete(key)
         const finish = () => toolLine(event.data.sessionID, event.data.assistantMessageID, event.data.id, tool?.name ?? "tool", tool?.input ?? {}, event.data.content, event.data.metadata, event.type === "session.tool.failed" ? event.data.error.message : undefined)
-        if (tool?.name === "subagent") {
+        if (tool?.name === "subagent" || tool?.name === "task") {
           // Recovery can involve I/O. Do not stop reading other children's live events.
           const pending = flushChild(event.data.sessionID, tool.input, event.data.metadata).then(finish).catch((error: unknown) => {
             failure ??= error instanceof Error ? error : new Error(String(error))

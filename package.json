@@ -1,6 +1,6 @@
 {
   "name": "@kompassdev/opencode-ci",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "OpenCode V2 CI runner with subagent output and command/skill support",
   "type": "module",
   "bin": {
