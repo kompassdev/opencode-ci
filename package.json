@@ -4,7 +4,7 @@
   "description": "OpenCode V2 CI runner with subagent output and command/skill support",
   "type": "module",
   "bin": {
-    "opencode-ci": "./dist/cli.js"
+    "opencode-ci": "dist/cli.js"
   },
   "files": ["dist", "docs", "README.md"],
   "repository": {
