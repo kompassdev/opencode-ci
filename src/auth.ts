@@ -110,3 +110,10 @@ export async function saveAuth(path: string, auth: Auth) {
 export async function loadAuth(path: string) {
   return parseAuth(await readFile(path, "utf8"))
 }
+
+export async function loadAuthIfExists(path: string) {
+  try { return await loadAuth(path) } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined
+    throw error
+  }
+}

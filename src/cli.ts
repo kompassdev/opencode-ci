@@ -2,11 +2,11 @@
 import { OpenCode } from "@opencode/sdk"
 import { Command, Option } from "commander"
 import { mkdtemp, rm, stat } from "node:fs/promises"
-import { tmpdir } from "node:os"
+import { homedir, tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { text } from "node:stream/consumers"
 import packageJSON from "../package.json" with { type: "json" }
-import { getAuth, loadAuth, parseAuth, saveAuth, setAuth } from "./auth"
+import { getAuth, loadAuth, loadAuthIfExists, parseAuth, saveAuth, setAuth } from "./auth"
 import { run } from "./run"
 
 const collect = (value: string, previous: string[]) => [...previous, value]
@@ -30,6 +30,7 @@ let cancellation: "SIGINT" | "SIGTERM" | "timeout" | undefined
 let timeoutSeconds = 2700
 
 async function executeRun(words: string[], options: RunFlags) {
+  const defaultAuthFile = join(homedir(), "opencode-ci.auth.json")
   const directory = resolve(options.directory ?? process.cwd())
   const files = options.file.map((file) => resolve(directory, file))
   timeoutSeconds = Number(options.timeout)
@@ -54,7 +55,10 @@ async function executeRun(words: string[], options: RunFlags) {
   process.on("SIGTERM", terminate)
   const timer = setTimeout(() => cancel("timeout"), timeoutSeconds * 1000)
   try {
-    const auth = options.authFile ? await loadAuth(options.authFile) : options.authEnv ? parseAuth(process.env[options.authEnv] ?? "") : undefined
+    const implicitAuth = !options.authFile && !options.authEnv
+    const auth = options.authFile ? await loadAuth(options.authFile) : options.authEnv ? parseAuth(process.env[options.authEnv] ?? "") : await loadAuthIfExists(defaultAuthFile)
+    if (options.authOutput && !auth) throw new Error("--auth-output requires an auth file or --auth-env")
+    const authOutput = options.authOutput ?? (implicitAuth && auth ? defaultAuthFile : undefined)
     const temp = await mkdtemp(join(tmpdir(), "opencode-ci-"))
     const db = join(temp, "opencode.db")
     try {
@@ -69,7 +73,7 @@ async function executeRun(words: string[], options: RunFlags) {
       } finally {
         await opencode.close()
         // Save refreshed tokens even if the session failed. Never print secrets to stdout.
-        if (options.authOutput && auth) await saveAuth(options.authOutput, getAuth(db, Object.keys(auth)))
+        if (authOutput && auth) await saveAuth(authOutput, getAuth(db, Object.keys(auth)))
       }
     } finally {
       await rm(temp, { recursive: true, force: true })
@@ -99,13 +103,11 @@ const command = program.command("run")
   .option("--thinking", "print reasoning blocks")
   .option("--auto", "approve permission requests once")
   .option("--timeout <seconds>", "timeout in seconds", "2700")
-  .addOption(new Option("--auth-file <path>", "read auth JSON from a file").conflicts("authEnv"))
+  .addOption(new Option("--auth-file <path>", "read auth JSON from a file (default: ~/opencode-ci.auth.json if present)").conflicts("authEnv"))
   .addOption(new Option("--auth-env <name>", "read auth JSON from an environment variable").conflicts("authFile"))
-  .option("--auth-output <path>", "save refreshed auth JSON to a file")
+  .option("--auth-output <path>", "save refreshed auth JSON to a file (default: update ~/opencode-ci.auth.json when used)")
 
 command.action(async (words: string[], options: RunFlags) => {
-  if (options.authOutput && !options.authFile && !options.authEnv)
-    throw new Error("--auth-output requires --auth-file or --auth-env")
   await executeRun(words, options)
 })
 
@@ -115,13 +117,14 @@ program.command("auth")
   .description("Export saved credentials from a local OpenCode database")
   .requiredOption("--db <path>", "OpenCode V2 database path")
   .option("--integration <id>", "integration to export (repeatable)", collect, [])
-  .requiredOption("--output <path>", "destination JSON file (mode 0600)")
-  .action(async (options: { db: string; integration: string[]; output: string }) => {
+  .option("--output <path>", "destination JSON file (default: ~/opencode-ci.auth.json, mode 0600)")
+  .action(async (options: { db: string; integration: string[]; output?: string }) => {
     if (!options.integration.length) throw new Error("--integration is required")
     const db = resolve(options.db)
     if (!(await stat(db)).isFile()) throw new Error(`Not a database file: ${db}`)
-    await saveAuth(resolve(options.output), getAuth(db, options.integration))
-    console.log(`Saved credentials for ${options.integration.join(", ")} to ${resolve(options.output)}`)
+    const output = options.output ? resolve(options.output) : join(homedir(), "opencode-ci.auth.json")
+    await saveAuth(output, getAuth(db, options.integration))
+    console.log(`Saved credentials for ${options.integration.join(", ")} to ${output}`)
   })
 
 try {
