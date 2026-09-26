@@ -1,9 +1,9 @@
-import type { OpenCodeClient } from "@opencode/client"
+import type { OpenCode } from "@opencode/sdk"
 import { readFile, stat } from "node:fs/promises"
 import { basename, extname } from "node:path"
 import { renderTool } from "./render-tool"
 
-type Client = Pick<OpenCodeClient, "session" | "message" | "event" | "skill" | "permission" | "model">
+type Client = Pick<OpenCode.Interface, "session" | "message" | "event" | "skill" | "permission" | "model">
 
 export type RunOptions = {
   directory: string

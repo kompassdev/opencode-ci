@@ -1,12 +1,16 @@
 #!/usr/bin/env node
-import { OpenCode } from "@opencode/client"
+import { OpenCode } from "@opencode/sdk"
+import { mkdtemp, rm, stat } from "node:fs/promises"
+import { tmpdir } from "node:os"
 import { resolve } from "node:path"
+import { join } from "node:path"
 import { text } from "node:stream/consumers"
+import { getAuth, loadAuth, parseAuth, saveAuth, setAuth } from "./auth"
 import { run } from "./run"
-import { standalone } from "./standalone"
+import packageJSON from "../package.json" with { type: "json" }
 
 const args = process.argv.slice(2)
-const usage = "Usage: opencode-ci [--directory PATH] [--model provider/model#variant] [--variant NAME] [--agent NAME] [--file PATH] [--title TITLE] [--thinking] [--auto] [--timeout SECONDS] PROMPT (or pipe stdin)"
+const usage = "Usage: opencode-ci run [--directory PATH] [--model provider/model#variant] [--variant NAME] [--agent NAME] [--file PATH] [--title TITLE] [--thinking] [--auto] [--timeout SECONDS] [--auth-file PATH | --auth-env NAME] [--auth-output PATH] PROMPT (or pipe stdin)\n       opencode-ci auth export --db PATH --integration ID [--integration ID...] --output PATH\n       opencode-ci --version"
 const value = (...flags: string[]) => {
   const index = args.findIndex((arg) => flags.includes(arg))
   if (index < 0) return undefined
@@ -34,48 +38,82 @@ try {
     console.log(usage)
     process.exit(0)
   }
-  const directory = resolve(value("--directory") ?? process.cwd())
-  const model = value("--model", "-m")
-  const variant = value("--variant")
-  const agent = value("--agent")
-  const files = values("--file", "-f").map((file) => resolve(directory, file))
-  const title = value("--title")
-  const thinking = boolean("--thinking")
-  const auto = boolean("--auto")
-  timeoutSeconds = Number(value("--timeout") ?? "2700")
-  if (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) throw new Error("--timeout must be positive seconds")
-  if (args.some((arg) => arg.startsWith("--"))) throw new Error(`Unknown option: ${args.find((arg) => arg.startsWith("--"))}`)
-  const piped = process.stdin.isTTY ? "" : (await text(process.stdin)).trim()
-  const prompt = [args.join(" "), piped].filter(Boolean).join("\n")
-  if (!prompt.trim()) throw new Error(usage)
-
-  const controller = new AbortController()
-  const cancel = (reason: "SIGINT" | "SIGTERM" | "timeout") => {
-    // A second cancellation is a hard stop if a provider or cleanup is stuck.
-    if (cancellation) process.exit(cancellation === "SIGTERM" ? 143 : cancellation === "SIGINT" ? 130 : 124)
-    cancellation = reason
-    process.exitCode = reason === "SIGINT" ? 130 : reason === "SIGTERM" ? 143 : 124
-    controller.abort(new Error(reason))
-    // CI may send only one signal; do not leave a stuck provider or SDK teardown running forever.
-    setTimeout(() => process.exit(process.exitCode ?? 1), 10_000).unref()
+  if (args.includes("--version") || args.includes("-v")) {
+    console.log(packageJSON.version)
+    process.exit(0)
   }
-  const interrupt = () => cancel("SIGINT")
-  const terminate = () => cancel("SIGTERM")
-  process.on("SIGINT", interrupt)
-  process.on("SIGTERM", terminate)
-  const timer = setTimeout(() => cancel("timeout"), timeoutSeconds * 1000)
-  try {
-    const server = await standalone(controller.signal)
-    try {
-      const opencode = OpenCode.make({ baseUrl: server.url, headers: server.headers })
-      await run(opencode, { directory, model, variant, agent, files, title, thinking, auto, prompt, signal: controller.signal })
-    } finally {
-      await server.close()
+  if (args[0] === "auth") {
+    if (args[1] !== "export") throw new Error(usage)
+    args.splice(0, 2)
+    const path = value("--db")
+    const output = value("--output")
+    const integrations = values("--integration")
+    if (!path || !output || !integrations.length || args.length) throw new Error(usage)
+    const db = resolve(path)
+    if (!(await stat(db)).isFile()) throw new Error(`Not a database file: ${db}`)
+    await saveAuth(resolve(output), getAuth(db, integrations))
+    console.log(`Saved credentials for ${integrations.join(", ")} to ${resolve(output)}`)
+  } else {
+    if (args[0] !== "run") throw new Error(usage)
+    args.shift()
+    const directory = resolve(value("--directory") ?? process.cwd())
+    const model = value("--model", "-m")
+    const variant = value("--variant")
+    const agent = value("--agent")
+    const files = values("--file", "-f").map((file) => resolve(directory, file))
+    const title = value("--title")
+    const thinking = boolean("--thinking")
+    const auto = boolean("--auto")
+    const authFile = value("--auth-file")
+    const authEnv = value("--auth-env")
+    const authOutput = value("--auth-output")
+    if (authFile && authEnv) throw new Error("Use only one of --auth-file and --auth-env")
+    if (authOutput && !authFile && !authEnv) throw new Error("--auth-output requires --auth-file or --auth-env")
+    timeoutSeconds = Number(value("--timeout") ?? "2700")
+    if (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) throw new Error("--timeout must be positive seconds")
+    if (args.some((arg) => arg.startsWith("--"))) throw new Error(`Unknown option: ${args.find((arg) => arg.startsWith("--"))}`)
+    const piped = process.stdin.isTTY ? "" : (await text(process.stdin)).trim()
+    const prompt = [args.join(" "), piped].filter(Boolean).join("\n")
+    if (!prompt.trim()) throw new Error(usage)
+
+    const controller = new AbortController()
+    const cancel = (reason: "SIGINT" | "SIGTERM" | "timeout") => {
+      // A second cancellation is a hard stop if a provider or cleanup is stuck.
+      if (cancellation) process.exit(cancellation === "SIGTERM" ? 143 : cancellation === "SIGINT" ? 130 : 124)
+      cancellation = reason
+      process.exitCode = reason === "SIGINT" ? 130 : reason === "SIGTERM" ? 143 : 124
+      controller.abort(new Error(reason))
+      // CI may send only one signal; do not leave a stuck provider or request running forever.
+      setTimeout(() => process.exit(process.exitCode ?? 1), 10_000).unref()
     }
-  } finally {
-    clearTimeout(timer)
-    process.off("SIGINT", interrupt)
-    process.off("SIGTERM", terminate)
+    const interrupt = () => cancel("SIGINT")
+    const terminate = () => cancel("SIGTERM")
+    process.on("SIGINT", interrupt)
+    process.on("SIGTERM", terminate)
+    const timer = setTimeout(() => cancel("timeout"), timeoutSeconds * 1000)
+    try {
+      const auth = authFile ? await loadAuth(authFile) : authEnv ? parseAuth(process.env[authEnv] ?? "") : undefined
+      const temp = await mkdtemp(join(tmpdir(), "opencode-ci-"))
+      const db = join(temp, "opencode.db")
+      try {
+        const opencode = await OpenCode.create({ database: { path: db } })
+        try {
+          if (auth) setAuth(db, auth)
+          controller.signal.throwIfAborted()
+          await run(opencode, { directory, model, variant, agent, files, title, thinking, auto, prompt, signal: controller.signal })
+        } finally {
+          await opencode.close()
+          // Save refreshed tokens even if the session failed. Never print secrets to stdout.
+          if (authOutput && auth) await saveAuth(authOutput, getAuth(db, Object.keys(auth)))
+        }
+      } finally {
+        await rm(temp, { recursive: true, force: true })
+      }
+    } finally {
+      clearTimeout(timer)
+      process.off("SIGINT", interrupt)
+      process.off("SIGTERM", terminate)
+    }
   }
 } catch (error) {
   if (cancellation === "SIGINT" || cancellation === "SIGTERM") {
